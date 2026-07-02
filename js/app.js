@@ -1,0 +1,211 @@
+// ── App shell: login, sidebar navigation, routing, live toasts ──
+import { LOCATIONS, ROLES, loc, canSeeOrder, canSeeRequest, canAdvanceOrder } from './data.js';
+import { store, startSim, stopSim } from './store.js';
+import { esc, icons, toast, closeLayer } from './ui.js';
+import { fittingView } from './fitting.js';
+import { stockView } from './stock.js';
+
+const app = document.getElementById('app');
+let view = null;          // active module view
+let unsub = null;
+let clockTimer = null;
+
+
+// ─────────────────────────── LOGIN ───────────────────────────
+function renderLogin(preselect = null) {
+  teardownShell();
+  const groups = [
+    ['Retail branches', 'retail'],
+    ['Fitting centres', 'fitting'],
+    ['Warehouse', 'admin'],
+  ];
+  app.innerHTML = `
+  <div class="login">
+    <aside class="login-brand">
+      <div class="lb-inner">
+        <div class="logo">${icons.glasses}<span>FOC<b>Portal</b></span></div>
+        <h1>One live board for the whole network.</h1>
+        <p>Fitting hand-offs and warehouse stock — every branch, fitting centre
+           and the warehouse looking at the same records, in real time.</p>
+        <div class="lb-live"><i></i> Live · shared across all locations</div>
+      </div>
+    </aside>
+    <main class="login-panel">
+      <div class="lp-inner">
+        <h2>Sign in as your location</h2>
+        <p class="lp-sub">Pick your location, then enter its PIN.</p>
+        ${groups.map(([title, role]) => `
+          <div class="lp-group">
+            <h3>${title}</h3>
+            <div class="lp-grid">
+              ${LOCATIONS.filter(l => l.role === role).map(l => `
+                <button class="loc-card role-${l.role} ${preselect === l.code ? 'sel' : ''}" data-loc="${l.code}">
+                  <span class="loc-code">${l.code}</span>
+                  <span class="loc-name">${esc(l.name)}</span>
+                </button>`).join('')}
+            </div>
+          </div>`).join('')}
+        <div class="pin-area ${preselect ? 'open' : ''}" id="pin-area">
+          ${preselect ? pinHTML(preselect) : ''}
+        </div>
+        <p class="demo-note">Demo PINs — branches &amp; fitting centres <code>1234</code>, warehouse <code>9999</code></p>
+      </div>
+    </main>
+  </div>`;
+
+  app.querySelectorAll('[data-loc]').forEach(btn => btn.addEventListener('click', () => {
+    app.querySelectorAll('.loc-card').forEach(b => b.classList.toggle('sel', b === btn));
+    const area = app.querySelector('#pin-area');
+    area.classList.add('open');
+    area.innerHTML = pinHTML(btn.dataset.loc);
+    wirePin(btn.dataset.loc);
+  }));
+  if (preselect) wirePin(preselect);
+}
+
+function pinHTML(code) {
+  const l = loc(code);
+  return `
+    <div class="pin-card">
+      <div class="pin-who"><span class="loc-chip">${code}</span> ${esc(l.name)} <em>· ${ROLES[l.role].label}</em></div>
+      <form id="pin-form" autocomplete="off">
+        <input id="pin-input" inputmode="numeric" maxlength="4" pattern="\\d{4}" placeholder="••••" autofocus>
+        <button class="btn btn-primary" type="submit">Enter ${icons.arrowRight}</button>
+      </form>
+      <div class="pin-err" id="pin-err"></div>
+    </div>`;
+}
+
+function wirePin(code) {
+  const form = app.querySelector('#pin-form');
+  const input = app.querySelector('#pin-input');
+  input?.focus();
+  form?.addEventListener('submit', e => {
+    e.preventDefault();
+    const ok = store.login(code, input.value.trim());
+    if (ok) {
+      location.hash = '#/fitting';
+      renderShell();
+    } else {
+      const err = app.querySelector('#pin-err');
+      err.textContent = 'Wrong PIN for this location.';
+      form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
+      input.select();
+    }
+  });
+}
+
+// ─────────────────────────── SHELL ───────────────────────────
+const MODULES = {
+  fitting: { label: 'Fitting Log', icon: 'glasses', make: fittingView },
+  stock:   { label: 'Stock Requests', icon: 'box', make: stockView, adminLabel: 'Warehouse Queue', adminIcon: 'warehouse' },
+};
+
+function currentModule() {
+  const key = (location.hash.match(/#\/(\w+)/) ?? [])[1];
+  return MODULES[key] ? key : 'fitting';
+}
+
+function badgeCounts(me) {
+  const s = store.state;
+  const fitting = s.orders.filter(o => o.status !== 'delivered' && canSeeOrder(o, me.code) && canAdvanceOrder(o, me.code)).length;
+  const stock = me.role === 'admin'
+    ? s.requests.filter(r => r.status === 'awaiting').length
+    : s.requests.filter(r => canSeeRequest(r, me.code) && r.status === 'dispatched').length;
+  return { fitting, stock };
+}
+
+function renderShell() {
+  teardownShell();
+  const me = store.session;
+  const mod = currentModule();
+  app.innerHTML = `
+    <div class="shell">
+      <nav class="side">
+        <div class="logo side-logo">${icons.glasses}<span>FOC<b>Portal</b></span></div>
+        <div class="side-nav" id="nav"></div>
+        <div class="side-foot">
+          <div class="live-ind"><i></i>Live · synced</div>
+          <div class="me-card">
+            <span class="me-code role-${me.role}">${me.code}</span>
+            <div class="me-meta">
+              <b>${esc(me.name)}</b>
+              <span>${ROLES[me.role].label}</span>
+            </div>
+          </div>
+          <div class="side-actions">
+            <button class="side-link" id="signout">${icons.logout}<span>Sign out</span></button>
+            <button class="side-link subtle" id="reset" title="Restore the seeded demo records">${icons.refresh}<span>Reset demo</span></button>
+          </div>
+        </div>
+      </nav>
+      <main class="content" id="content"></main>
+    </div>`;
+
+  renderNav(me, mod);
+  app.querySelector('#signout').addEventListener('click', () => {
+    store.logout(); stopSim(); closeLayer(); renderLogin();
+  });
+  app.querySelector('#reset').addEventListener('click', () => {
+    if (confirm('Reset all demo data back to the seeded state? This affects every open tab.')) store.resetDemo();
+  });
+
+  mountModule(mod);
+  startSim();
+
+  unsub = store.subscribe(event => {
+    renderNav(store.session, currentModule());
+    view?.onChange(event);
+    if (event?.remote && event.title && event.module !== 'system') {
+      const relevant =
+        (event.module === 'fitting' && event.refs?.some(id => { const o = store.state.orders.find(x => x.id === id); return o && canSeeOrder(o, me.code); })) ||
+        (event.module === 'stock' && event.refs?.some(id => { const r = store.state.requests.find(x => x.id === id); return r && canSeeRequest(r, me.code); }));
+      if (relevant) toast({ title: event.title, sub: event.sub ?? '', tone: event.module === 'fitting' ? 'info' : 'stock' });
+    }
+    if (event?.module === 'system') { // demo reset from any tab
+      mountModule(currentModule());
+    }
+  });
+  clockTimer = setInterval(() => view?.onChange(), 45e3); // keep relative times fresh
+}
+
+function renderNav(me, active) {
+  const nav = app.querySelector('#nav');
+  if (!nav) return;
+  const b = badgeCounts(me);
+  nav.innerHTML = Object.entries(MODULES).map(([key, m]) => {
+    const label = me.role === 'admin' && m.adminLabel ? m.adminLabel : m.label;
+    const icon = icons[me.role === 'admin' && m.adminIcon ? m.adminIcon : m.icon];
+    return `
+      <a class="nav-item ${active === key ? 'on' : ''}" href="#/${key}">
+        ${icon}<span>${label}</span>
+        ${b[key] ? `<em class="nav-badge">${b[key]}</em>` : ''}
+      </a>`;
+  }).join('');
+}
+
+function mountModule(key) {
+  view?.unmount();
+  closeLayer();
+  const me = store.session;
+  view = MODULES[key].make(me);
+  const content = app.querySelector('#content');
+  content.classList.remove('mod-in'); void content.offsetWidth; content.classList.add('mod-in');
+  view.mount(content);
+  renderNav(me, key);
+}
+
+function teardownShell() {
+  unsub?.(); unsub = null;
+  clearInterval(clockTimer); clockTimer = null;
+  view?.unmount(); view = null;
+}
+
+// Re-route inside the shell on hash change without a full shell rebuild.
+window.addEventListener('hashchange', () => {
+  if (store.session && app.querySelector('.shell')) mountModule(currentModule());
+});
+
+// ── boot ──
+store.restoreSession();
+if (store.session) renderShell(); else renderLogin();
