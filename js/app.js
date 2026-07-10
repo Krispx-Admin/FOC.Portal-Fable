@@ -4,6 +4,7 @@ import { store, startSim, stopSim } from './store.js';
 import { esc, icons, toast, closeLayer } from './ui.js';
 import { fittingView } from './fitting.js';
 import { stockView } from './stock.js';
+import { settingsView } from './settings.js';
 
 const app = document.getElementById('app');
 let view = null;          // active module view
@@ -17,6 +18,7 @@ function renderLogin(preselect = null) {
   const groups = [
     ['Retail branches', 'retail'],
     ['Fitting centres', 'fitting'],
+    ['Clinics', 'clinic'],
     ['Warehouse', 'admin'],
   ];
   app.innerHTML = `
@@ -97,21 +99,27 @@ function wirePin(code) {
 
 // ─────────────────────────── SHELL ───────────────────────────
 const MODULES = {
-  fitting: { label: 'Fitting Log', icon: 'glasses', make: fittingView },
-  stock:   { label: 'Stock Requests', icon: 'box', make: stockView, adminLabel: 'Warehouse Queue', adminIcon: 'warehouse' },
+  fitting:  { label: 'Fitting Log', icon: 'glasses', make: fittingView },
+  stock:    { label: 'Stock Requests', icon: 'box', make: stockView, adminLabel: 'Warehouse Queue', adminIcon: 'warehouse' },
+  settings: { label: 'Settings', icon: 'settings', make: settingsView, adminOnly: true },
 };
+
+function moduleAllowed(key, me) {
+  const m = MODULES[key];
+  return m && (!m.adminOnly || me?.role === 'admin');
+}
 
 function currentModule() {
   const key = (location.hash.match(/#\/(\w+)/) ?? [])[1];
-  return MODULES[key] ? key : 'fitting';
+  return moduleAllowed(key, store.session) ? key : 'fitting';
 }
 
 function badgeCounts(me) {
   const s = store.state;
-  const fitting = s.orders.filter(o => o.status !== 'delivered' && canSeeOrder(o, me.code) && canAdvanceOrder(o, me.code)).length;
+  const fitting = s.orders.filter(o => o.status !== 'delivered' && canSeeOrder(o, me.code) && canAdvanceOrder(o, me.code) && !(o.status === 'pending' && o.fitter)).length;
   const stock = me.role === 'admin'
-    ? s.requests.filter(r => r.status === 'awaiting').length
-    : s.requests.filter(r => canSeeRequest(r, me.code) && r.status === 'dispatched').length;
+    ? s.requests.filter(r => r.status === 'placed').length
+    : s.requests.filter(r => canSeeRequest(r, me.code) && r.status === 'placed').length;
   return { fitting, stock };
 }
 
@@ -173,7 +181,7 @@ function renderNav(me, active) {
   const nav = app.querySelector('#nav');
   if (!nav) return;
   const b = badgeCounts(me);
-  nav.innerHTML = Object.entries(MODULES).map(([key, m]) => {
+  nav.innerHTML = Object.entries(MODULES).filter(([key]) => moduleAllowed(key, me)).map(([key, m]) => {
     const label = me.role === 'admin' && m.adminLabel ? m.adminLabel : m.label;
     const icon = icons[me.role === 'admin' && m.adminIcon ? m.adminIcon : m.icon];
     return `
@@ -184,14 +192,20 @@ function renderNav(me, active) {
   }).join('');
 }
 
+let mountedKey = null;
+
 function mountModule(key) {
   view?.unmount();
   closeLayer();
   const me = store.session;
   view = MODULES[key].make(me);
-  const content = app.querySelector('#content');
+  // Swap in a fresh content node so listeners from the previous view die with it.
+  const old = app.querySelector('#content');
+  const content = old.cloneNode(false);
+  old.replaceWith(content);
   content.classList.remove('mod-in'); void content.offsetWidth; content.classList.add('mod-in');
   view.mount(content);
+  mountedKey = key;
   renderNav(me, key);
 }
 
@@ -203,7 +217,7 @@ function teardownShell() {
 
 // Re-route inside the shell on hash change without a full shell rebuild.
 window.addEventListener('hashchange', () => {
-  if (store.session && app.querySelector('.shell')) mountModule(currentModule());
+  if (store.session && app.querySelector('.shell') && currentModule() !== mountedKey) mountModule(currentModule());
 });
 
 // ── boot ──

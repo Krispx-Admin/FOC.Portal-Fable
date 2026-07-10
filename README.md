@@ -1,7 +1,7 @@
 # FOC Portal — Optical Operations
 
 An internal, real-time operations portal for a multi-branch optical retail
-chain: nine retail branches, three lens-fitting centres and one central
+chain: retail branches, lens-fitting centres, eye clinics and one central
 warehouse, all looking at the same live board.
 
 **Zero build step.** Plain HTML + CSS + ES modules — serve the folder with any
@@ -16,8 +16,8 @@ python3 -m http.server 8000     # or: npx serve
 
 | Module | What it does |
 |---|---|
-| **Fitting Log** | Tracks a frame's physical journey: branch → fitting centre → back to the branch. Pipeline: Pending → En route to fitter → At fitter → Ready → Returning → Delivered, with bulk advance, urgent flags, a per-order journey diagram and a full audit timeline. |
-| **Stock Requests** | Two-sided procurement. Branches compose multi-line requests (brand + category + audience + qty); the warehouse reviews line by line — adjust quantities, reject individual lines or the whole request — then approves, dispatches, and the branch confirms receipt. |
+| **Fitting Log** | Tracks a frame's physical journey: branch → fitting centre → back to the branch. Log an order with just a bill number, then send it to a fitting centre. Pipeline: Pending → In transit to fitter → At fitter → Ready → Returning → Delivered, with click-to-select + bulk advance, urgent flags, a per-order journey diagram (the fitter node turns green when ready) and a full audit timeline. |
+| **Stock Requests** | Branches compose category-first requests; the admin controls, per category, whether brand/audience/quantity are needed (Settings). No review step — the warehouse prints the pick sheet, fulfils it, and marks it completed. |
 
 ## The model
 

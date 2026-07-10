@@ -1,13 +1,15 @@
 // ── Module 1: Fitting Log — the frame's journey branch → fitter → branch ──
 import { FIT_FLOW, FIT_STATUS, FITTERS, BRANCHES, locName, fitActor, canAdvanceOrder } from './data.js';
 import { store } from './store.js';
-import { esc, relTime, fmtDT, icons, pill, urgentTag, locChip, openLayer, closeLayer } from './ui.js';
+import { esc, relTime, fmtDT, icons, pill, urgentTag, locChip, openLayer, closeLayer, toast } from './ui.js';
 
 const CHIP_DEFS = [
   { key: 'active', label: 'All active' },
   ...FIT_FLOW.filter(s => s !== 'delivered').map(s => ({ key: s, label: FIT_STATUS[s].label })),
   { key: 'delivered', label: 'Delivered' },
 ];
+
+const READY_IDX = FIT_FLOW.indexOf('ready');
 
 export function fittingView(me) {
   const ui = {
@@ -30,7 +32,7 @@ export function fittingView(me) {
     if (isAdmin && ui.fitter !== 'all') list = list.filter(o => o.fitter === ui.fitter);
     if (ui.q) {
       const q = ui.q.toLowerCase();
-      list = list.filter(o => [o.ref, o.customer, o.brand, o.model, o.origin, o.fitter, locName(o.origin), locName(o.fitter)]
+      list = list.filter(o => [o.ref, o.customer, o.brand, o.model, o.origin, o.fitter, locName(o.origin), o.fitter ? locName(o.fitter) : '']
         .some(v => String(v).toLowerCase().includes(q)));
     }
     return list.sort((a, b) => (b.urgent - a.urgent) || (b.updatedAt - a.updatedAt));
@@ -48,17 +50,20 @@ export function fittingView(me) {
     const stage = FIT_FLOW.indexOf(o.status); // 0..5
     const seg1 = stage >= 2 ? 'done' : stage === 1 ? 'moving' : '';
     const seg2 = stage >= 5 ? 'done' : stage === 4 ? 'moving' : '';
-    const n = i => stage >= i ? 'done' : stage === i - 1 ? '' : '';
+    // Fitter node: brand navy from the moment it's in play, green once ready.
+    const fitterCls = stage >= READY_IDX ? 'ready' : stage >= 1 ? 'done' : '';
     const node = (code, cls, lbl) => `
       <div class="j-node ${cls}">
         <span class="j-pin">${esc(code)}</span>
         ${big ? `<span class="j-lbl">${esc(lbl)}</span>` : ''}
       </div>`;
+    const fitterCode = o.fitter ?? '?';
+    const fitterName = o.fitter ? locName(o.fitter) : 'Unassigned';
     return `
-      <div class="journey ${big ? 'journey-big' : ''}" title="${esc(locName(o.origin))} → ${esc(locName(o.fitter))} → back">
-        ${node(o.origin, stage >= 0 ? 'done' : '', locName(o.origin))}
+      <div class="journey ${big ? 'journey-big' : ''}" title="${esc(locName(o.origin))} → ${esc(fitterName)} → back">
+        ${node(o.origin, 'done', locName(o.origin))}
         <i class="j-seg ${seg1}"></i>
-        ${node(o.fitter, stage >= 2 ? 'done' : '', locName(o.fitter))}
+        ${node(fitterCode, fitterCls, fitterName)}
         <i class="j-seg ${seg2}"></i>
         ${node(o.origin, stage >= 5 ? 'done' : '', 'Back at branch')}
       </div>`;
@@ -68,7 +73,7 @@ export function fittingView(me) {
   function statsHTML() {
     const all = store.ordersFor(me.code);
     const active = all.filter(o => o.status !== 'delivered');
-    const mine = active.filter(o => canAdvanceOrder(o, me.code));
+    const mine = active.filter(o => canAdvanceOrder(o, me.code) && !(o.status === 'pending' && o.fitter));
     const week = all.filter(o => o.status === 'delivered' && Date.now() - o.updatedAt < 7 * 864e5);
     const t = (n, lbl, cls = '') => `
       <div class="stat ${cls}"><div class="stat-n">${n}</div><div class="stat-l">${lbl}</div></div>`;
@@ -86,37 +91,63 @@ export function fittingView(me) {
       const isNew = !ui.seen.has(o.id);
       const changed = ui.prevStatus.get(o.id) !== o.status;
       const can = canAdvanceOrder(o, me.code);
-      const next = FIT_STATUS[o.status];
+      const st = FIT_STATUS[o.status];
+      const selected = ui.selected.has(o.id);
+      const needsFitter = o.status === 'pending' && !o.fitter;
+      // Primary action: pick a fitter, advance, or show who we're waiting on.
+      let action;
+      if (needsFitter && can) action = `<button class="btn btn-primary btn-sm" data-send-fitter="${o.id}">${icons.send} Send to fitter</button>`;
+      else if (can && st.action) action = `<button class="btn btn-ghost btn-sm" data-advance="${o.id}">${esc(st.action)} ${icons.arrowRight}</button>`;
+      else action = `<span class="row-actor">${o.status === 'delivered' ? icons.check : `waiting on ${esc(fitActor(o) ?? '')}`}</span>`;
+      const title = o.customer || 'No customer name';
+      const frame = [o.brand, o.model].filter(Boolean).join(' ') + (o.lens ? ` · ${o.lens}` : '');
       return `
-      <div class="row ${isNew ? 'row-enter' : ''} ${o.urgent ? 'row-urgent' : ''}" data-open="${o.id}">
-        <label class="cbx" data-stop><input type="checkbox" data-sel="${o.id}" ${ui.selected.has(o.id) ? 'checked' : ''} ${o.status === 'delivered' ? 'disabled' : ''}><i></i></label>
+      <div class="row ${isNew ? 'row-enter' : ''} ${o.urgent ? 'row-urgent' : ''} ${selected ? 'row-selected' : ''}" data-select="${o.id}">
+        <label class="cbx" data-stop><input type="checkbox" data-sel="${o.id}" ${selected ? 'checked' : ''} ${o.status === 'delivered' ? 'disabled' : ''}><i></i></label>
         <div class="row-main">
           <div class="row-title">
             <b>${esc(o.ref)}</b>
             ${o.urgent ? urgentTag() : ''}
-            <span class="row-cust">${esc(o.customer)}</span>
+            <span class="row-cust">${esc(title)}</span>
           </div>
-          <div class="row-sub">${esc(o.brand)} ${esc(o.model)} · ${esc(o.lens)}</div>
+          <div class="row-sub">${frame ? `<span class="row-sub-txt">${esc(frame)}</span>` : ''}<span class="row-when" title="Logged ${fmtDT(o.createdAt)}">${frame ? '· ' : ''}${relTime(o.createdAt)}</span></div>
         </div>
         <div class="row-journey">${journey(o)}</div>
         <div class="row-status">${pill(FIT_STATUS, o.status, { flash: changed })}</div>
-        <div class="row-time" title="${fmtDT(o.updatedAt)}">${relTime(o.updatedAt)}</div>
         <div class="row-act" data-stop>
-          ${can && next.action ? `<button class="btn btn-ghost btn-sm" data-advance="${o.id}">${esc(next.action)} ${icons.arrowRight}</button>` : `<span class="row-actor">${o.status === 'delivered' ? icons.check : `waiting on ${esc(fitActor(o) ?? '')}`}</span>`}
+          ${action}
+          <button class="icon-btn open-arrow" data-open="${o.id}" title="Open order">${icons.chevronRight}</button>
         </div>
       </div>`;
     }).join('');
   }
 
+  // The one next action shared by every selected order — or null if they
+  // need different actions (mixed stages / waiting on someone else).
+  function bulkAction() {
+    const sel = [...ui.selected].map(id => store.order(id)).filter(Boolean);
+    let action = null, ok = sel.length > 0;
+    for (const o of sel) {
+      const label = !canAdvanceOrder(o, me.code) ? null
+        : (o.status === 'pending' && !o.fitter) ? 'Send to fitter'
+        : FIT_STATUS[o.status].action;
+      if (!label) { ok = false; continue; }
+      if (action === null) action = label;
+      else if (action !== label) ok = false;
+    }
+    return { count: sel.length, action, ok: ok && !!action };
+  }
+
   function bulkHTML() {
-    const eligible = [...ui.selected].map(id => store.order(id)).filter(o => o && canAdvanceOrder(o, me.code));
     if (!ui.selected.size) return '';
+    const { count, action, ok } = bulkAction();
     return `
       <div class="bulkbar">
-        <span><b>${ui.selected.size}</b> selected</span>
-        <button class="btn btn-primary btn-sm" data-bulk-advance ${eligible.length ? '' : 'disabled'}>
-          ${icons.checks} Advance ${eligible.length} order${eligible.length === 1 ? '' : 's'}
+        <span><b>${count}</b> selected</span>
+        <button class="btn btn-primary btn-sm" data-bulk-act ${ok ? '' : 'disabled'}>
+          ${icons.checks} ${esc(action ?? 'Advance')}${count > 1 ? ` · ${count} orders` : ''}
         </button>
+        ${!ok ? `<span class="bulk-hint">selected orders need different actions</span>` : ''}
         <button class="btn btn-ghost btn-sm" data-bulk-clear>Clear</button>
       </div>`;
   }
@@ -135,12 +166,13 @@ export function fittingView(me) {
     if (!o) return `<div class="pad">Order no longer exists.</div>`;
     const can = canAdvanceOrder(o, me.code);
     const st = FIT_STATUS[o.status];
+    const needsFitter = o.status === 'pending' && !o.fitter;
     return `
       <div class="dw-head">
         <div>
           <div class="dw-kicker">Fitting order</div>
           <h2>${esc(o.ref)} ${o.urgent ? urgentTag() : ''}</h2>
-          <div class="dw-sub">${esc(o.customer)}${o.phone ? ` · ${esc(o.phone)}` : ''}</div>
+          <div class="dw-sub">${esc(o.customer || 'No customer name')}${o.phone ? ` · ${esc(o.phone)}` : ''}</div>
         </div>
         <button class="icon-btn" data-close>${icons.x}</button>
       </div>
@@ -148,14 +180,13 @@ export function fittingView(me) {
         <div class="dw-status-row">${pill(FIT_STATUS, o.status)}<span class="dw-when">updated ${relTime(o.updatedAt)}</span></div>
         ${journey(o, true)}
         <div class="kv">
-          <div><span>Frame</span><b>${esc(o.brand)} ${esc(o.model)}</b></div>
-          <div><span>Lens job</span><b>${esc(o.lens)}</b></div>
           <div><span>Origin</span><b>${locChip(o.origin)} ${esc(locName(o.origin))}</b></div>
-          <div><span>Fitting centre</span><b>${locChip(o.fitter)} ${esc(locName(o.fitter))}</b></div>
+          <div><span>Fitting centre</span><b>${o.fitter ? `${locChip(o.fitter)} ${esc(locName(o.fitter))}` : '<span class="muted">Not assigned yet</span>'}</b></div>
           ${o.note ? `<div class="kv-wide"><span>Note</span><b>${esc(o.note)}</b></div>` : ''}
         </div>
         <div class="dw-actions">
-          ${can && st.action ? `<button class="btn btn-primary" data-advance="${o.id}">${esc(st.action)} ${icons.arrowRight}</button>` : ''}
+          ${needsFitter && can ? `<button class="btn btn-primary" data-send-fitter="${o.id}">${icons.send} Send to fitter</button>` :
+            can && st.action ? `<button class="btn btn-primary" data-advance="${o.id}">${esc(st.action)} ${icons.arrowRight}</button>` : ''}
           ${o.status !== 'delivered' ? `<button class="btn btn-ghost" data-urgent="${o.id}">${icons.zap} ${o.urgent ? 'Remove urgent flag' : 'Flag urgent'}</button>` : ''}
         </div>
         <h3 class="tl-h">${icons.history} Timeline</h3>
@@ -175,6 +206,8 @@ export function fittingView(me) {
     drawer = openLayer('drawer', drawerHTML, { onClose: () => { drawer = null; drawerId = null; } });
     drawer.el.addEventListener('click', e => {
       if (e.target.closest('[data-close]')) return drawer.close();
+      const sf = e.target.closest('[data-send-fitter]');
+      if (sf) return fitterPicker(sf.dataset.sendFitter);
       const adv = e.target.closest('[data-advance]');
       if (adv) return store.advanceOrders([adv.dataset.advance], me.code);
       const urg = e.target.closest('[data-urgent]');
@@ -182,7 +215,40 @@ export function fittingView(me) {
     });
   }
 
-  // ── new order modal ──
+  // ── fitter picker (assign + send, one order or a bulk selection) ──
+  function fitterPicker(ids) {
+    ids = Array.isArray(ids) ? ids : [ids];
+    const orders = ids.map(id => store.order(id)).filter(o => o && o.status === 'pending' && !o.fitter);
+    if (!orders.length) return;
+    const what = orders.length === 1 ? orders[0].ref : `${orders.length} orders`;
+    const layer = openLayer('modal', () => `
+      <div class="dw-head">
+        <div><div class="dw-kicker">Send to fitter</div><h2>Choose a fitting centre for ${esc(what)}</h2></div>
+        <button class="icon-btn" data-close>${icons.x}</button>
+      </div>
+      <div class="form">
+        <p class="muted">Pick where ${orders.length === 1 ? 'this frame' : 'these frames'} should go for lens fitting.</p>
+        <div class="picker-grid">
+          ${FITTERS.map(f => `
+            <button class="picker-card" data-fitter="${f.code}">
+              <span class="loc-chip">${f.code}</span>
+              <b>${esc(f.name)}</b>
+              ${icons.arrowRight}
+            </button>`).join('')}
+        </div>
+      </div>`);
+    layer.el.addEventListener('click', e => {
+      if (e.target.closest('[data-close]')) return layer.close();
+      const f = e.target.closest('[data-fitter]');
+      if (f) {
+        ui.selected.clear(); // clear first — the store commit below triggers the re-render
+        store.sendOrdersToFitter(orders.map(o => o.id), f.dataset.fitter, me.code);
+        layer.close();
+      }
+    });
+  }
+
+  // ── new order modal — bill number only ──
   function newOrderModal() {
     const layer = openLayer('modal', () => `
       <div class="dw-head">
@@ -191,38 +257,25 @@ export function fittingView(me) {
       </div>
       <form class="form" id="nf">
         <div class="grid2">
-          <label>Bill / reference no <input name="ref" required value="${esc(store.nextBillRef())}"></label>
-          <label>Customer name <input name="customer" required placeholder="e.g. Ahmed Al Balushi"></label>
-          <label>Phone <span class="opt">optional</span><input name="phone" placeholder="9xxx xxxx"></label>
-          <label>Fitting centre
-            <select name="fitter">${FITTERS.map(f => `<option value="${f.code}">${esc(f.name)} (${f.code})</option>`).join('')}</select>
-          </label>
-          <label>Frame brand <input name="brand" required list="brands" placeholder="Ray-Ban"></label>
-          <label>Frame model <input name="model" required placeholder="RB5154"></label>
+          <label>Bill number <input name="ref" required value="${esc(store.nextBillRef())}" autofocus></label>
+          <label>Customer name <span class="opt">optional</span><input name="customer" placeholder="e.g. Ahmed Al Balushi"></label>
         </div>
-        <label>Lens job <input name="lens" required placeholder="e.g. Progressive 1.67 blue-cut"></label>
-        <label>Note <span class="opt">optional</span><input name="note" placeholder="Anything the fitter should know"></label>
-        <label class="check"><input type="checkbox" name="urgent"><i></i>${icons.zap} Urgent — floats to the top everywhere</label>
+        <p class="muted">You'll pick which fitting centre to send it to after it's logged.</p>
         <div class="form-foot">
           <button type="button" class="btn btn-ghost" data-close>Cancel</button>
           <button type="submit" class="btn btn-primary">${icons.send} Log order</button>
         </div>
       </form>
-      <datalist id="brands">${['Ray-Ban','Oakley','Gucci','Prada','Tom Ford','Persol','Versace','Emporio Armani','Carrera','Police','Vogue Eyewear','Silhouette','Lindberg','Cazal'].map(b => `<option value="${b}">`).join('')}</datalist>
     `);
     layer.el.addEventListener('click', e => { if (e.target.closest('[data-close]')) layer.close(); });
     layer.el.querySelector('#nf').addEventListener('submit', e => {
       e.preventDefault();
       const f = new FormData(e.target);
-      const o = store.createOrder({
-        ref: f.get('ref').trim(), origin: me.code, fitter: f.get('fitter'),
-        customer: f.get('customer').trim(), phone: f.get('phone').trim(),
-        brand: f.get('brand').trim(), model: f.get('model').trim(),
-        lens: f.get('lens').trim(), note: f.get('note').trim(),
-        urgent: !!f.get('urgent'),
-      }, me.code);
+      const ref = f.get('ref').trim();
+      if (!ref) return;
+      const o = store.createOrder({ ref, origin: me.code, customer: f.get('customer').trim() }, me.code);
       layer.close();
-      openDrawer(o.id);
+      toast({ title: `${o.ref} logged`, sub: 'Use “Send to fitter” when it leaves your branch', tone: 'info' });
     });
   }
 
@@ -260,10 +313,15 @@ export function fittingView(me) {
     drawer?.update();
   }
 
-  // (drawer content is read-only; safe to re-render on every change)
-
   function markSeen() {
     for (const o of store.state.orders) { ui.seen.add(o.id); ui.prevStatus.set(o.id, o.status); }
+  }
+
+  function toggleSelect(id) {
+    const o = store.order(id);
+    if (!o || o.status === 'delivered') return;
+    if (ui.selected.has(id)) ui.selected.delete(id); else ui.selected.add(id);
+    refreshLists();
   }
 
   function wire() {
@@ -277,19 +335,28 @@ export function fittingView(me) {
       const chip = e.target.closest('[data-chip]');
       if (chip) { ui.chip = chip.dataset.chip; ui.selected.clear(); refreshLists(); return; }
       if (e.target.closest('[data-bulk-clear]')) { ui.selected.clear(); refreshLists(); return; }
-      if (e.target.closest('[data-bulk-advance]')) {
+      if (e.target.closest('[data-bulk-act]')) {
+        const { action, ok } = bulkAction();
+        if (!ok) return;
         const ids = [...ui.selected];
+        if (action === 'Send to fitter') { fitterPicker(ids); return; } // picker clears selection on send
         ui.selected.clear();
         store.advanceOrders(ids, me.code); // store change triggers refresh
         return;
       }
+      // Open the detail drawer via the arrow button.
+      const openBtn = e.target.closest('[data-open]');
+      if (openBtn) { e.stopPropagation(); openDrawer(openBtn.dataset.open); return; }
+      const sf = e.target.closest('[data-send-fitter]');
+      if (sf) { e.stopPropagation(); fitterPicker(sf.dataset.sendFitter); return; }
       const adv = e.target.closest('[data-advance]');
       if (adv) { e.stopPropagation(); store.advanceOrders([adv.dataset.advance], me.code); return; }
       const sel = e.target.closest('[data-sel]');
-      if (sel) { sel.checked ? ui.selected.add(sel.dataset.sel) : ui.selected.delete(sel.dataset.sel); root.querySelector('#f-bulk').innerHTML = bulkHTML(); return; }
+      if (sel) { toggleSelect(sel.dataset.sel); return; }
       if (e.target.closest('[data-stop]')) return;
-      const row = e.target.closest('[data-open]');
-      if (row) openDrawer(row.dataset.open);
+      // Clicking the row selects it.
+      const row = e.target.closest('[data-select]');
+      if (row) toggleSelect(row.dataset.select);
     });
   }
 
