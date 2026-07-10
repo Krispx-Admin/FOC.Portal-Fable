@@ -1,50 +1,49 @@
-// ── Module 2: Stock Requests — branch composer + warehouse review queue ──
-import { REQ_STATUS, BRANDS, CATEGORIES, AUDIENCES, BRANCHES, locName } from './data.js';
+// ── Module 2: Stock Requests — branch composer + warehouse fulfilment queue ──
+import { REQ_STATUS, AUDIENCES, BRANCHES, locName } from './data.js';
 import { store } from './store.js';
 import { esc, relTime, fmtDT, icons, pill, locChip, openLayer, closeLayer } from './ui.js';
 
 const CHIPS = [
-  { key: 'open', label: 'Open' },
-  { key: 'awaiting', label: 'Awaiting review' },
-  { key: 'approved', label: 'Approved · packing' },
-  { key: 'dispatched', label: 'Dispatched' },
-  { key: 'received', label: 'Received' },
-  { key: 'rejected', label: 'Rejected' },
+  { key: 'placed', label: 'To fulfil' },
+  { key: 'completed', label: 'Completed' },
   { key: 'all', label: 'All' },
 ];
-const OPEN = ['awaiting', 'approved', 'dispatched'];
 
-const units = r => r.lines.reduce((s, l) => s + (l.lineStatus === 'rejected' ? 0 : (l.lineStatus === 'approved' ? l.approvedQty : l.qty)), 0);
+const units = r => r.lines.reduce((s, l) => s + (l.qty || 0), 0);
+const unitLbl = l => l.unit === 'box' ? (l.qty === 1 ? 'box' : 'boxes') : 'pcs';
+// e.g. "3 lines · 24 pcs · 5 boxes"
+function unitsBreakdown(lines) {
+  const pcs = lines.reduce((s, l) => s + (l.qty && l.unit !== 'box' ? l.qty : 0), 0);
+  const box = lines.reduce((s, l) => s + (l.qty && l.unit === 'box' ? l.qty : 0), 0);
+  return [pcs ? `${pcs} pcs` : '', box ? `${box} box${box === 1 ? '' : 'es'}` : ''].filter(Boolean).join(' · ');
+}
 
 export function stockView(me) {
   const isAdmin = me.role === 'admin';
   const ui = {
-    chip: isAdmin ? 'awaiting' : 'open', q: '', branch: 'all',
+    chip: isAdmin ? 'placed' : 'all', q: '', branch: 'all',
     seen: new Set(store.state.requests.map(r => r.id)),
     prevStatus: new Map(store.state.requests.map(r => [r.id, r.status])),
   };
   let root, drawer = null, drawerId = null;
-  let review = null; // local warehouse review draft: { [lineId]: {qty, rejected} }
-  let rejecting = false;
 
   function visible() {
     let list = store.requestsFor(me.code);
-    if (ui.chip === 'open') list = list.filter(r => OPEN.includes(r.status));
-    else if (ui.chip !== 'all') list = list.filter(r => r.status === ui.chip);
+    if (ui.chip !== 'all') list = list.filter(r => r.status === ui.chip);
     if (isAdmin && ui.branch !== 'all') list = list.filter(r => r.branch === ui.branch);
     if (ui.q) {
       const q = ui.q.toLowerCase();
-      list = list.filter(r => [r.ref, r.branch, locName(r.branch), ...r.lines.map(l => `${l.brand} ${l.category}`)]
+      list = list.filter(r => [r.ref, r.branch, locName(r.branch), ...r.lines.map(l => `${l.category} ${l.brand ?? ''}`)]
         .some(v => String(v).toLowerCase().includes(q)));
     }
-    const rank = { awaiting: 0, approved: 1, dispatched: 2, received: 3, rejected: 3 };
+    const rank = { placed: 0, completed: 1 };
     return list.sort((a, b) => (rank[a.status] - rank[b.status]) || (b.updatedAt - a.updatedAt));
   }
 
   const counts = () => {
     const all = store.requestsFor(me.code);
-    const c = { open: 0, all: all.length, awaiting: 0, approved: 0, dispatched: 0, received: 0, rejected: 0 };
-    for (const r of all) { c[r.status]++; if (OPEN.includes(r.status)) c.open++; }
+    const c = { placed: 0, completed: 0, all: all.length };
+    for (const r of all) c[r.status]++;
     return c;
   };
 
@@ -53,16 +52,16 @@ export function stockView(me) {
     const c = counts();
     const t = (n, lbl, cls = '') => `<div class="stat ${cls}"><div class="stat-n">${n}</div><div class="stat-l">${lbl}</div></div>`;
     if (isAdmin) {
-      const week = all.filter(r => r.status === 'received' && Date.now() - r.updatedAt < 7 * 864e5).length;
-      return t(c.awaiting, 'Awaiting review', 'stat-amber') + t(c.approved, 'Packing') + t(c.dispatched, 'On the road', 'stat-brand') + t(week, 'Fulfilled · 7d');
+      const week = all.filter(r => r.status === 'completed' && Date.now() - r.updatedAt < 7 * 864e5).length;
+      const openUnits = all.filter(r => r.status === 'placed').reduce((s, r) => s + units(r), 0);
+      return t(c.placed, 'To fulfil', 'stat-amber') + t(openUnits, 'Units to pick', 'stat-brand') + t(week, 'Completed · 7d') + t(c.all, 'All requests');
     }
-    const inbound = all.filter(r => r.status === 'dispatched');
-    const inboundUnits = inbound.reduce((s, r) => s + units(r), 0);
-    return t(c.open, 'Open requests') + t(c.awaiting, 'Awaiting review', 'stat-amber') + t(inbound.length, 'Inbound to you', 'stat-brand') + t(inboundUnits, 'Units on the way');
+    const mine = all.filter(r => r.status === 'placed');
+    return t(c.placed, 'Awaiting warehouse', 'stat-amber') + t(mine.reduce((s, r) => s + units(r), 0), 'Units requested', 'stat-brand') + t(c.completed, 'Completed') + t(c.all, 'All requests');
   }
 
   function lineSummary(r) {
-    const names = r.lines.slice(0, 2).map(l => `${l.brand} · ${l.category}`);
+    const names = r.lines.slice(0, 2).map(l => l.brand ? `${l.category} · ${l.brand}` : l.category);
     const more = r.lines.length - names.length;
     return esc(names.join(', ')) + (more > 0 ? ` <span class="muted">+${more} more</span>` : '');
   }
@@ -73,10 +72,9 @@ export function stockView(me) {
     return list.map(r => {
       const isNew = !ui.seen.has(r.id);
       const changed = ui.prevStatus.get(r.id) !== r.status;
-      const quick =
-        isAdmin && r.status === 'awaiting' ? `<button class="btn btn-ghost btn-sm" data-open-row="${r.id}">Review ${icons.arrowRight}</button>` :
-        isAdmin && r.status === 'approved' ? `<button class="btn btn-ghost btn-sm" data-dispatch="${r.id}">${icons.truck} Dispatch</button>` :
-        !isAdmin && r.status === 'dispatched' ? `<button class="btn btn-ghost btn-sm" data-receive="${r.id}">${icons.check} Mark received</button>` : '';
+      const quick = isAdmin && r.status === 'placed'
+        ? `<button class="btn btn-ghost btn-sm" data-print="${r.id}">${icons.printer} Print</button>
+           <button class="btn btn-ghost btn-sm" data-complete="${r.id}">${icons.check} Complete</button>` : '';
       return `
       <div class="row ${isNew ? 'row-enter' : ''}" data-open="${r.id}">
         <div class="row-main">
@@ -85,7 +83,7 @@ export function stockView(me) {
           </div>
           <div class="row-sub">${lineSummary(r)}</div>
         </div>
-        <div class="row-units"><b>${r.lines.length}</b> line${r.lines.length === 1 ? '' : 's'} · <b>${units(r)}</b> units</div>
+        <div class="row-units"><b>${r.lines.length}</b> line${r.lines.length === 1 ? '' : 's'}${unitsBreakdown(r.lines) ? ` · ${unitsBreakdown(r.lines)}` : ''}</div>
         <div class="row-status">${pill(REQ_STATUS, r.status, { flash: changed })}</div>
         <div class="row-time" title="${fmtDT(r.updatedAt)}">${relTime(r.updatedAt)}</div>
         <div class="row-act" data-stop>${quick}</div>
@@ -98,40 +96,27 @@ export function stockView(me) {
     return CHIPS.map(d => `<button class="chip ${ui.chip === d.key ? 'on' : ''}" data-chip="${d.key}">${esc(d.label)}<span class="chip-n">${c[d.key]}</span></button>`).join('');
   };
 
-  // ── drawer: request detail (+ warehouse review mode) ──
-  function beginReview(r) {
-    review = {};
-    for (const l of r.lines) review[l.id] = { qty: l.qty, rejected: false };
-  }
-
+  // ── drawer: request detail ──
   function linesTableHTML(r) {
-    const reviewing = isAdmin && r.status === 'awaiting' && review;
+    const anyBrand = r.lines.some(l => l.brand);
+    const anyAud = r.lines.some(l => l.audience);
+    const anyQty = r.lines.some(l => l.qty != null);
     return `
       <table class="lines">
-        <thead><tr><th>Item</th><th>Audience</th><th class="num">Requested</th><th class="num">${reviewing || r.status !== 'awaiting' ? 'Approved' : ''}</th>${reviewing ? '<th></th>' : ''}</tr></thead>
+        <thead><tr>
+          <th>Category</th>
+          ${anyBrand ? '<th>Brand</th>' : ''}
+          ${anyAud ? '<th>Audience</th>' : ''}
+          ${anyQty ? '<th class="num">Qty</th>' : ''}
+        </tr></thead>
         <tbody>
-          ${r.lines.map(l => {
-            const d = reviewing ? review[l.id] : null;
-            const rejected = reviewing ? d.rejected : l.lineStatus === 'rejected';
-            const approvedCell = reviewing
-              ? (rejected ? '<span class="muted">—</span>' : `
-                  <span class="stepper" data-stop>
-                    <button class="step-btn" data-step="-1" data-line="${l.id}">${icons.minus}</button>
-                    <b>${d.qty}</b>
-                    <button class="step-btn" data-step="1" data-line="${l.id}">${icons.plus}</button>
-                  </span>`)
-              : r.status === 'awaiting' ? ''
-              : rejected ? '<span class="muted">—</span>'
-              : `<b>${l.approvedQty}</b>${l.approvedQty !== l.qty ? ` <span class="adj">was ${l.qty}</span>` : ''}`;
-            return `
-            <tr class="${rejected ? 'line-rejected' : ''}">
-              <td><b>${esc(l.brand)}</b> · ${esc(l.category)}${l.note ? `<div class="line-note">${esc(l.note)}</div>` : ''}</td>
-              <td>${esc(l.audience)}</td>
-              <td class="num">${l.qty}</td>
-              <td class="num">${approvedCell}</td>
-              ${reviewing ? `<td class="num"><button class="btn btn-ghost btn-sm ${rejected ? 'btn-danger-on' : ''}" data-reject-line="${l.id}">${rejected ? 'Restore' : 'Reject'}</button></td>` : ''}
-            </tr>`;
-          }).join('')}
+          ${r.lines.map(l => `
+            <tr>
+              <td><b>${esc(l.category)}</b>${l.note ? `<div class="line-note">${esc(l.note)}</div>` : ''}</td>
+              ${anyBrand ? `<td>${l.brand ? esc(l.brand) : '<span class="muted">—</span>'}</td>` : ''}
+              ${anyAud ? `<td>${l.audience ? esc(l.audience) : '<span class="muted">—</span>'}</td>` : ''}
+              ${anyQty ? `<td class="num">${l.qty != null ? `<b>${l.qty}</b> <span class="muted">${unitLbl(l)}</span>` : '<span class="muted">—</span>'}</td>` : ''}
+            </tr>`).join('')}
         </tbody>
       </table>`;
   }
@@ -139,21 +124,10 @@ export function stockView(me) {
   function drawerHTML() {
     const r = store.request(drawerId);
     if (!r) return `<div class="pad">Request no longer exists.</div>`;
-    const reviewing = isAdmin && r.status === 'awaiting';
-    if (reviewing && !review) beginReview(r);
-    const kept = reviewing ? Object.values(review).filter(d => !d.rejected).length : 0;
-    const actions =
-      reviewing ? `
-        ${rejecting ? `
-          <div class="reject-box">
-            <input id="rej-reason" placeholder="Reason — the branch will see this" autofocus>
-            <button class="btn btn-danger" data-reject-confirm>Reject request</button>
-            <button class="btn btn-ghost" data-reject-cancel>Back</button>
-          </div>` : `
-          <button class="btn btn-primary" data-approve ${kept ? '' : 'disabled'}>${icons.check} Approve ${kept} of ${r.lines.length} lines</button>
-          <button class="btn btn-ghost btn-danger-text" data-reject-start>Reject whole request</button>`}` :
-      isAdmin && r.status === 'approved' ? `<button class="btn btn-primary" data-dispatch="${r.id}">${icons.truck} Mark dispatched</button>` :
-      r.status === 'dispatched' && (isAdmin || r.branch === me.code) ? `<button class="btn btn-primary" data-receive="${r.id}">${icons.check} Mark received</button>` : '';
+    const actions = isAdmin && r.status === 'placed'
+      ? `<button class="btn btn-ghost" data-print="${r.id}">${icons.printer} Print PDF</button>
+         <button class="btn btn-primary" data-complete="${r.id}">${icons.check} Mark completed</button>`
+      : '';
     return `
       <div class="dw-head">
         <div>
@@ -165,7 +139,7 @@ export function stockView(me) {
       </div>
       <div class="dw-body">
         <div class="dw-status-row">${pill(REQ_STATUS, r.status)}<span class="dw-when">updated ${relTime(r.updatedAt)}</span></div>
-        ${reviewing ? `<div class="review-hint">${icons.wrench} Review each line — adjust quantities or reject lines, then approve.</div>` : ''}
+        ${isAdmin && r.status === 'placed' ? `<div class="review-hint">${icons.printer} Print the pick sheet, fulfil it physically, then mark it completed.</div>` : ''}
         ${linesTableHTML(r)}
         <div class="dw-actions">${actions}</div>
         <h3 class="tl-h">${icons.history} Timeline</h3>
@@ -181,44 +155,93 @@ export function stockView(me) {
   }
 
   function openDrawer(id) {
-    drawerId = id; review = null; rejecting = false;
-    drawer = openLayer('drawer', drawerHTML, { onClose: () => { drawer = null; drawerId = null; review = null; } });
+    drawerId = id;
+    drawer = openLayer('drawer', drawerHTML, { onClose: () => { drawer = null; drawerId = null; } });
     drawer.el.addEventListener('click', e => {
       if (e.target.closest('[data-close]')) return drawer.close();
-      const step = e.target.closest('[data-step]');
-      if (step) {
-        const d = review[step.dataset.line];
-        d.qty = Math.max(0, d.qty + Number(step.dataset.step));
-        return drawer.update();
-      }
-      const rej = e.target.closest('[data-reject-line]');
-      if (rej) { review[rej.dataset.rejectLine].rejected = !review[rej.dataset.rejectLine].rejected; return drawer.update(); }
-      if (e.target.closest('[data-approve]')) {
-        const decisions = {};
-        for (const [lid, d] of Object.entries(review)) decisions[lid] = d.rejected ? { rejected: true } : { qty: d.qty };
-        review = null;
-        return store.reviewRequest(drawerId, decisions, me.code);
-      }
-      if (e.target.closest('[data-reject-start]')) { rejecting = true; return drawer.update(); }
-      if (e.target.closest('[data-reject-cancel]')) { rejecting = false; return drawer.update(); }
-      if (e.target.closest('[data-reject-confirm]')) {
-        const reason = drawer.el.querySelector('#rej-reason')?.value.trim();
-        rejecting = false; review = null;
-        return store.rejectRequest(drawerId, reason, me.code);
-      }
-      const disp = e.target.closest('[data-dispatch]');
-      if (disp) return store.dispatchRequest(disp.dataset.dispatch, me.code);
-      const recv = e.target.closest('[data-receive]');
-      if (recv) return store.receiveRequest(recv.dataset.receive, me.code);
+      const pr = e.target.closest('[data-print]');
+      if (pr) return printRequest(store.request(pr.dataset.print));
+      const cp = e.target.closest('[data-complete]');
+      if (cp) return store.completeRequest(cp.dataset.complete, me.code);
     });
+  }
+
+  // ── print pick sheet (browser print → PDF) ──
+  function printRequest(r) {
+    if (!r) return;
+    const rows = r.lines.map(l => `
+      <tr>
+        <td>${esc(l.category)}${l.note ? `<div class="n">${esc(l.note)}</div>` : ''}</td>
+        <td>${esc(l.brand ?? '—')}</td>
+        <td>${esc(l.audience ?? '—')}</td>
+        <td class="num">${l.qty != null ? `${l.qty} ${unitLbl(l)}` : '—'}</td>
+        <td class="pick"></td>
+      </tr>`).join('');
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(r.ref)} — Pick Sheet</title>
+      <style>
+        body{font:13px system-ui,Segoe UI,Roboto,sans-serif;color:#17202b;padding:32px;}
+        h1{font-size:22px;margin:0 0 2px;}
+        .meta{color:#4c5a6b;margin-bottom:18px;}
+        .meta b{color:#17202b;}
+        table{width:100%;border-collapse:collapse;margin-top:10px;}
+        th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #e3e8f0;vertical-align:top;}
+        th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8593a5;}
+        .num{text-align:right;}
+        .pick{width:80px;border:1px solid #cfd8e5;}
+        .n{color:#8593a5;font-size:11px;margin-top:2px;}
+        .foot{margin-top:26px;color:#8593a5;font-size:11px;border-top:1px solid #e3e8f0;padding-top:10px;}
+        @media print{body{padding:0;}}
+      </style></head><body>
+      <h1>Stock Request — ${esc(r.ref)}</h1>
+      <div class="meta"><b>${esc(locName(r.branch))}</b> (${esc(r.branch)}) → Warehouse · Placed ${esc(fmtDT(r.createdAt))}${r.note ? ` · Note: ${esc(r.note)}` : ''}</div>
+      <table>
+        <thead><tr><th>Category</th><th>Brand</th><th>Audience</th><th class="num">Qty</th><th>Picked</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="foot">${r.lines.length} line${r.lines.length === 1 ? '' : 's'}${unitsBreakdown(r.lines) ? ` · ${unitsBreakdown(r.lines)}` : ''} · Generated ${esc(fmtDT(Date.now()))}</div>
+      </body></html>`;
+    const w = window.open('', '_blank');
+    if (!w) return;
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 300);
   }
 
   // ── composer: new stock request ──
   function composerModal() {
+    const cats = store.settings.categories;
+    const brands = store.settings.brands;
+    const catByName = name => cats.find(c => c.name === name) ?? cats[0];
+    function blankLine() {
+      const c = cats[0];
+      return { category: c.name, brand: c.needsBrand ? brands[0] : '', audience: c.needsAudience ? 'Unisex' : '', qty: c.needsQty !== false ? 6 : null, unit: 'pcs', note: '' };
+    }
     let lines = [blankLine()];
-    function blankLine() { return { brand: BRANDS[0], category: CATEGORIES[0], audience: 'Unisex', qty: 6, note: '' }; }
+
     const sel = (name, opts, val, i) => `
       <select data-f="${name}" data-i="${i}">${opts.map(o => `<option ${o === val ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+
+    const lineRow = (l, i) => {
+      const c = catByName(l.category);
+      return `
+        <div class="cl-row">
+          ${sel('category', cats.map(c => c.name), l.category, i)}
+          ${c.needsBrand ? sel('brand', brands, l.brand, i) : '<span class="cl-na">—</span>'}
+          ${c.needsAudience ? sel('audience', AUDIENCES, l.audience, i) : '<span class="cl-na">—</span>'}
+          ${c.needsQty !== false ? `
+            <span class="qty-unit">
+              <input type="number" min="1" max="999" value="${l.qty ?? 1}" data-f="qty" data-i="${i}">
+              <select data-f="unit" data-i="${i}">
+                <option value="pcs" ${l.unit !== 'box' ? 'selected' : ''}>pcs</option>
+                <option value="box" ${l.unit === 'box' ? 'selected' : ''}>boxes</option>
+              </select>
+            </span>` : '<span class="cl-na">—</span>'}
+          <input placeholder="optional" value="${esc(l.note)}" data-f="note" data-i="${i}">
+          <button class="icon-btn" data-del="${i}" ${lines.length === 1 ? 'disabled' : ''}>${icons.x}</button>
+        </div>`;
+    };
+
     const layer = openLayer('modal', () => `
       <div class="dw-head">
         <div><div class="dw-kicker">New stock request</div><h2>Request inventory from the warehouse</h2></div>
@@ -226,31 +249,25 @@ export function stockView(me) {
       </div>
       <div class="form">
         <div class="composer-lines">
-          <div class="cl-head"><span>Brand</span><span>Category</span><span>Audience</span><span>Qty</span><span>Note</span><span></span></div>
-          ${lines.map((l, i) => `
-            <div class="cl-row">
-              ${sel('brand', BRANDS, l.brand, i)}
-              ${sel('category', CATEGORIES, l.category, i)}
-              ${sel('audience', AUDIENCES, l.audience, i)}
-              <input type="number" min="1" max="999" value="${l.qty}" data-f="qty" data-i="${i}">
-              <input placeholder="optional" value="${esc(l.note)}" data-f="note" data-i="${i}">
-              <button class="icon-btn" data-del="${i}" ${lines.length === 1 ? 'disabled' : ''}>${icons.x}</button>
-            </div>`).join('')}
+          <div class="cl-head"><span>Category</span><span>Brand</span><span>Audience</span><span>Qty</span><span>Note</span><span></span></div>
+          ${lines.map((l, i) => lineRow(l, i)).join('')}
         </div>
         <button class="btn btn-ghost btn-sm" data-add>${icons.plus} Add line</button>
         <label>Request note <span class="opt">optional</span><input id="req-note" placeholder="e.g. Weekend promo prep"></label>
         <div class="form-foot">
           <span class="muted" id="comp-total"></span>
           <button class="btn btn-ghost" data-close>Cancel</button>
-          <button class="btn btn-primary" data-send>${icons.send} Send to warehouse</button>
+          <button class="btn btn-primary" data-send>${icons.send} Place request</button>
         </div>
       </div>`);
 
     const totals = () => {
-      const u = lines.reduce((s, l) => s + (l.qty || 0), 0);
+      const bd = unitsBreakdown(lines);
       const t = layer.el.querySelector('#comp-total');
-      if (t) t.textContent = `${lines.length} line${lines.length === 1 ? '' : 's'} · ${u} units`;
+      if (t) t.textContent = `${lines.length} line${lines.length === 1 ? '' : 's'}${bd ? ` · ${bd}` : ''}`;
     };
+    const preserveNote = () => layer.el.querySelector('#req-note')?.value ?? '';
+    const restoreNote = v => { const n = layer.el.querySelector('#req-note'); if (n) n.value = v; };
     totals();
 
     layer.el.addEventListener('input', e => {
@@ -262,27 +279,51 @@ export function stockView(me) {
     });
     layer.el.addEventListener('change', e => {
       const f = e.target.dataset.f;
-      if (f && e.target.tagName === 'SELECT') lines[Number(e.target.dataset.i)][f] = e.target.value;
+      if (!(f && e.target.tagName === 'SELECT')) return;
+      const i = Number(e.target.dataset.i);
+      const l = lines[i];
+      if (f === 'category') {
+        // Switching category re-applies that category's field rules.
+        const c = catByName(e.target.value);
+        l.category = e.target.value;
+        l.brand = c.needsBrand ? (l.brand || store.settings.brands[0]) : '';
+        l.audience = c.needsAudience ? (l.audience || 'Unisex') : '';
+        l.qty = c.needsQty !== false ? (l.qty || 6) : null;
+        l.unit = c.needsQty !== false ? (l.unit || 'pcs') : 'pcs';
+        const note = preserveNote();
+        layer.update(); restoreNote(note); totals();
+      } else {
+        l[f] = e.target.value;
+      }
     });
     layer.el.addEventListener('click', e => {
       if (e.target.closest('[data-close]')) return layer.close();
       if (e.target.closest('[data-add]')) {
-        const note = layer.el.querySelector('#req-note').value;
+        const note = preserveNote();
         lines.push(blankLine());
-        layer.update(); layer.el.querySelector('#req-note').value = note; totals();
+        layer.update(); restoreNote(note); totals();
         return;
       }
       const del = e.target.closest('[data-del]');
       if (del) {
-        const note = layer.el.querySelector('#req-note').value;
+        const note = preserveNote();
         lines.splice(Number(del.dataset.del), 1);
-        layer.update(); layer.el.querySelector('#req-note').value = note; totals();
+        layer.update(); restoreNote(note); totals();
         return;
       }
       if (e.target.closest('[data-send]')) {
-        const clean = lines.filter(l => l.qty > 0).map(l => ({ ...l, brand: l.brand.trim(), note: l.note.trim() }));
+        const clean = lines
+          .filter(l => l.category && (catByName(l.category).needsQty === false || l.qty > 0))
+          .map(l => {
+            const c = catByName(l.category);
+            const out = { category: l.category, note: (l.note || '').trim() };
+            if (c.needsBrand) out.brand = (l.brand || '').trim();
+            if (c.needsAudience) out.audience = l.audience;
+            if (c.needsQty !== false) { out.qty = l.qty; out.unit = l.unit === 'box' ? 'box' : 'pcs'; }
+            return out;
+          });
         if (!clean.length) return;
-        const r = store.createRequest({ lines: clean, note: layer.el.querySelector('#req-note').value.trim() }, me.code);
+        const r = store.createRequest({ lines: clean, note: preserveNote().trim() }, me.code);
         layer.close();
         openDrawer(r.id);
       }
@@ -295,13 +336,13 @@ export function stockView(me) {
       <header class="mod-head">
         <div>
           <h1>${isAdmin ? 'Warehouse — Request Queue' : 'Stock Requests'}</h1>
-          <p class="mod-sub">${isAdmin ? 'Every branch’s requests — review line by line, then dispatch' : 'Request inventory from the central warehouse and track it here'}</p>
+          <p class="mod-sub">${isAdmin ? 'Print each request, fulfil it, then mark it completed' : 'Request inventory from the central warehouse and track it here'}</p>
         </div>
         ${!isAdmin ? `<button class="btn btn-primary" data-new>${icons.plus} New stock request</button>` : ''}
       </header>
       <section class="stats" id="s-stats">${statsHTML()}</section>
       <section class="toolbar">
-        <div class="searchbox">${icons.search}<input id="s-q" placeholder="Search ref, branch, brand…" value="${esc(ui.q)}"></div>
+        <div class="searchbox">${icons.search}<input id="s-q" placeholder="Search ref, branch, category…" value="${esc(ui.q)}"></div>
         ${isAdmin ? `<select class="sel" id="s-branch"><option value="all">All branches</option>${BRANCHES.map(b => `<option value="${b.code}" ${ui.branch === b.code ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select>` : ''}
       </section>
       <section class="chips" id="s-chips">${chipsHTML()}</section>
@@ -330,12 +371,10 @@ export function stockView(me) {
     root.addEventListener('click', e => {
       const chip = e.target.closest('[data-chip]');
       if (chip) { ui.chip = chip.dataset.chip; refreshLists(); return; }
-      const disp = e.target.closest('[data-dispatch]');
-      if (disp) { e.stopPropagation(); store.dispatchRequest(disp.dataset.dispatch, me.code); return; }
-      const recv = e.target.closest('[data-receive]');
-      if (recv) { e.stopPropagation(); store.receiveRequest(recv.dataset.receive, me.code); return; }
-      const rowBtn = e.target.closest('[data-open-row]');
-      if (rowBtn) { e.stopPropagation(); openDrawer(rowBtn.dataset.openRow); return; }
+      const pr = e.target.closest('[data-print]');
+      if (pr) { e.stopPropagation(); printRequest(store.request(pr.dataset.print)); return; }
+      const cp = e.target.closest('[data-complete]');
+      if (cp) { e.stopPropagation(); store.completeRequest(cp.dataset.complete, me.code); return; }
       if (e.target.closest('[data-stop]')) return;
       const row = e.target.closest('[data-open]');
       if (row) openDrawer(row.dataset.open);

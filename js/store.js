@@ -1,10 +1,12 @@
 // ── State store: persistence, cross-tab realtime sync, mutations, simulator ──
 import {
-  seedState, LOCATIONS, loc, locName, BRANCHES, FITTERS, BRANDS, CATEGORIES, AUDIENCES,
-  FIT_FLOW, FIT_STATUS, nextFitStatus, fitActor, canAdvanceOrder, canSeeOrder, canSeeRequest,
+  seedState, loc, locName, BRANCHES, FITTERS, AUDIENCES,
+  FIT_STATUS, nextFitStatus, fitActor,
+  canAdvanceOrder, canSeeOrder, canSeeRequest,
 } from './data.js';
 
-const STATE_KEY = 'focp.state.v2';
+const STATE_VERSION = 3;
+const STATE_KEY = 'focp.state.v3';
 const SESSION_KEY = 'focp.session';
 const LEADER_KEY = 'focp.leader';
 const TAB = Math.random().toString(36).slice(2, 10);
@@ -15,7 +17,7 @@ const subs = new Set();
 function load() {
   try {
     const raw = localStorage.getItem(STATE_KEY);
-    if (raw) { const s = JSON.parse(raw); if (s?.v === 2) return s; }
+    if (raw) { const s = JSON.parse(raw); if (s?.v === STATE_VERSION) return s; }
   } catch { /* corrupted → reseed */ }
   const s = seedState();
   localStorage.setItem(STATE_KEY, JSON.stringify(s));
@@ -48,6 +50,7 @@ function commit(event) {
 
 export const store = {
   get state() { return state; },
+  get settings() { return state.settings; },
   subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
 
   // ── Session ──
@@ -89,13 +92,40 @@ export const store = {
     state.seq.bill = Math.max(state.seq.bill + 1, parseInt(String(fields.ref).replace(/\D/g, ''), 10) || 0);
     const o = {
       id: 'o' + now.toString(36) + Math.random().toString(36).slice(2, 6),
-      ...fields, status: 'pending', createdAt: now, updatedAt: now,
+      ref: fields.ref, origin: fields.origin,
+      fitter: fields.fitter ?? null,
+      customer: fields.customer ?? '', phone: fields.phone ?? '',
+      brand: fields.brand ?? '', model: fields.model ?? '', lens: fields.lens ?? '',
+      urgent: !!fields.urgent, note: fields.note ?? '',
+      status: 'pending', createdAt: now, updatedAt: now,
       timeline: [{ at: now, by, text: `Order logged at ${locName(by)}${fields.note ? ` — ${fields.note}` : ''}` }],
     };
     state.orders.unshift(o);
-    commit({ by, module: 'fitting', title: `${by} logged fitting order ${o.ref}`, sub: `${o.brand} ${o.model} → ${locName(o.fitter)}`, refs: [o.id] });
+    commit({ by, module: 'fitting', title: `${by} logged fitting order ${o.ref}`, sub: 'Awaiting fitter assignment', refs: [o.id] });
     return o;
   },
+
+  // Assign a fitter to pending orders and put them in transit (single commit).
+  sendOrdersToFitter(ids, fitter, by) {
+    const now = Date.now();
+    const moved = [];
+    for (const id of ids) {
+      const o = this.order(id);
+      if (!o || o.status !== 'pending' || o.fitter) continue;
+      o.fitter = fitter;
+      o.status = 'to_fitter';
+      o.updatedAt = now;
+      o.timeline.push({ at: now, by, text: `Sent to ${locName(fitter)} — in transit to fitter` });
+      moved.push(o);
+    }
+    if (!moved.length) return [];
+    const title = moved.length === 1
+      ? `${by} · ${moved[0].ref} → ${FIT_STATUS.to_fitter.label}`
+      : `${by} sent ${moved.length} orders to ${locName(fitter)}`;
+    commit({ by, module: 'fitting', title, sub: `→ ${locName(fitter)}`, refs: moved.map(o => o.id) });
+    return moved;
+  },
+  sendToFitter(id, fitter, by) { return this.sendOrdersToFitter([id], fitter, by)[0]; },
 
   advanceOrders(ids, by) {
     const now = Date.now();
@@ -103,6 +133,7 @@ export const store = {
     for (const id of ids) {
       const o = this.order(id);
       if (!o || !canAdvanceOrder(o, by)) continue;
+      if (o.status === 'pending' && !o.fitter) continue; // must pick a fitter first
       const from = o.status;
       o.status = nextFitStatus(from);
       o.updatedAt = now;
@@ -113,7 +144,7 @@ export const store = {
     const title = moved.length === 1
       ? `${by} · ${moved[0].ref} → ${FIT_STATUS[moved[0].status].label}`
       : `${by} moved ${moved.length} orders forward`;
-    commit({ by, module: 'fitting', title, sub: moved.length === 1 ? moved[0].customer : moved.map(o => o.ref).join(', '), refs: moved.map(o => o.id) });
+    commit({ by, module: 'fitting', title, sub: moved.length === 1 ? (moved[0].customer || moved[0].ref) : moved.map(o => o.ref).join(', '), refs: moved.map(o => o.id) });
     return moved;
   },
 
@@ -130,82 +161,70 @@ export const store = {
   createRequest({ lines, note }, by) {
     const now = Date.now();
     state.seq.req++;
-    const units = lines.reduce((s, l) => s + l.qty, 0);
+    const units = lines.reduce((s, l) => s + (l.qty || 0), 0);
     const r = {
       id: 'q' + now.toString(36) + Math.random().toString(36).slice(2, 6),
-      ref: `SR-${state.seq.req}`, branch: by, status: 'awaiting', note: note ?? '',
-      lines: lines.map((l, i) => ({ id: `l${now.toString(36)}${i}`, ...l, approvedQty: l.qty, lineStatus: 'pending' })),
+      ref: `SR-${state.seq.req}`, branch: by, status: 'placed', note: note ?? '',
+      lines: lines.map((l, i) => ({ id: `l${now.toString(36)}${i}`, ...l })),
       createdAt: now, updatedAt: now,
-      timeline: [{ at: now, by, text: `Request submitted — ${lines.length} line${lines.length > 1 ? 's' : ''}, ${units} units${note ? ` — ${note}` : ''}` }],
+      timeline: [{ at: now, by, text: `Request placed — ${lines.length} line${lines.length > 1 ? 's' : ''}${units ? `, ${units} units` : ''}${note ? ` — ${note}` : ''}` }],
     };
     state.requests.unshift(r);
-    commit({ by, module: 'stock', title: `${by} requested stock ${r.ref}`, sub: `${lines.length} lines · ${units} units`, refs: [r.id] });
+    commit({ by, module: 'stock', title: `${by} placed stock request ${r.ref}`, sub: `${lines.length} lines${units ? ` · ${units} units` : ''}`, refs: [r.id] });
     return r;
   },
 
-  // decisions: { [lineId]: { qty?, rejected?, reason? } }
-  reviewRequest(id, decisions, by) {
+  // Warehouse marks a placed request done after physically fulfilling it.
+  completeRequest(id, by) {
     const r = this.request(id);
-    if (!r || r.status !== 'awaiting') return;
+    if (!r || r.status !== 'placed') return;
     const now = Date.now();
-    let adjusted = 0, rejected = 0;
-    for (const l of r.lines) {
-      const d = decisions[l.id] ?? {};
-      if (d.rejected) {
-        l.lineStatus = 'rejected';
-        rejected++;
-        r.timeline.push({ at: now, by, text: `Line rejected: ${l.brand} · ${l.category}${d.reason ? ` — ${d.reason}` : ''}` });
-      } else {
-        l.lineStatus = 'approved';
-        const q = Math.max(0, d.qty ?? l.qty);
-        l.approvedQty = q;
-        if (q !== l.qty) {
-          adjusted++;
-          r.timeline.push({ at: now, by, text: `Quantity adjusted: ${l.brand} · ${l.category} — ${l.qty} → ${q}` });
-        }
-      }
-    }
-    const ok = r.lines.length - rejected;
-    if (ok === 0) {
-      r.status = 'rejected';
-      r.timeline.push({ at: now, by, text: 'Request rejected — all lines rejected' });
-    } else {
-      r.status = 'approved';
-      r.timeline.push({ at: now, by, text: `Approved — ${ok} of ${r.lines.length} lines${adjusted ? `, ${adjusted} adjusted` : ''}${rejected ? `, ${rejected} rejected` : ''}. Packing started` });
-    }
+    r.status = 'completed';
     r.updatedAt = now;
-    commit({ by, module: 'stock', title: `${by} ${ok ? 'approved' : 'rejected'} ${r.ref}`, sub: ok ? `${ok}/${r.lines.length} lines approved` : '', refs: [r.id] });
+    r.timeline.push({ at: now, by, text: 'Fulfilled and completed at the warehouse' });
+    commit({ by, module: 'stock', title: `${by} completed ${r.ref}`, sub: `→ ${locName(r.branch)}`, refs: [r.id] });
   },
 
-  rejectRequest(id, reason, by) {
-    const r = this.request(id);
-    if (!r || r.status !== 'awaiting') return;
-    const now = Date.now();
-    r.status = 'rejected';
-    r.lines.forEach(l => { l.lineStatus = 'rejected'; });
-    r.updatedAt = now;
-    r.timeline.push({ at: now, by, text: `Request rejected${reason ? ` — ${reason}` : ''}` });
-    commit({ by, module: 'stock', title: `${by} rejected ${r.ref}`, sub: reason ?? '', refs: [r.id] });
+  // ── Settings (admin) ──
+  addBrand(name) {
+    name = String(name).trim();
+    if (!name || state.settings.brands.some(b => b.toLowerCase() === name.toLowerCase())) return;
+    state.settings.brands.push(name);
+    commit({ module: 'settings', title: `Brand added: ${name}` });
   },
-
-  dispatchRequest(id, by) {
-    const r = this.request(id);
-    if (!r || r.status !== 'approved') return;
-    const now = Date.now();
-    r.status = 'dispatched';
-    r.updatedAt = now;
-    r.timeline.push({ at: now, by, text: 'Dispatched from warehouse' });
-    commit({ by, module: 'stock', title: `${by} dispatched ${r.ref}`, sub: `→ ${locName(r.branch)}`, refs: [r.id] });
+  removeBrand(name) {
+    state.settings.brands = state.settings.brands.filter(b => b !== name);
+    commit({ module: 'settings', title: `Brand removed: ${name}` });
   },
-
-  receiveRequest(id, by) {
-    const r = this.request(id);
-    if (!r || r.status !== 'dispatched') return;
-    const now = Date.now();
-    r.status = 'received';
-    r.updatedAt = now;
-    r.timeline.push({ at: now, by, text: `Received at ${locName(r.branch)}` });
-    commit({ by, module: 'stock', title: `${by} received ${r.ref}`, refs: [r.id] });
+  reorderBrands(from, to) {
+    const a = state.settings.brands;
+    if (from === to || from < 0 || to < 0 || from >= a.length || to >= a.length) return;
+    const [x] = a.splice(from, 1);
+    a.splice(to, 0, x);
+    commit({ module: 'settings', title: 'Brands reordered' });
+  },
+  addCategory({ name, needsBrand = true, needsAudience = true, needsQty = true }) {
+    name = String(name).trim();
+    if (!name || state.settings.categories.some(c => c.name.toLowerCase() === name.toLowerCase())) return;
+    state.settings.categories.push({ name, needsBrand, needsAudience, needsQty });
+    commit({ module: 'settings', title: `Category added: ${name}` });
+  },
+  updateCategory(name, patch) {
+    const c = state.settings.categories.find(c => c.name === name);
+    if (!c) return;
+    Object.assign(c, patch);
+    commit({ module: 'settings', title: `Category updated: ${c.name}` });
+  },
+  removeCategory(name) {
+    state.settings.categories = state.settings.categories.filter(c => c.name !== name);
+    commit({ module: 'settings', title: `Category removed: ${name}` });
+  },
+  reorderCategories(from, to) {
+    const a = state.settings.categories;
+    if (from === to || from < 0 || to < 0 || from >= a.length || to >= a.length) return;
+    const [x] = a.splice(from, 1);
+    a.splice(to, 0, x);
+    commit({ module: 'settings', title: 'Categories reordered' });
   },
 };
 
@@ -240,11 +259,16 @@ function simTick() {
   const now = Date.now();
   const ops = [];
 
-  // Advance a fitting order that has sat in its stage for a bit — acting as
-  // whichever location is naturally next, never as the signed-in location.
+  // Move fitting orders along — acting as whichever location is naturally
+  // next, never as the signed-in location.
   for (const o of state.orders) {
+    if (now - o.updatedAt < 100e3) continue;
+    if (o.status === 'pending' && !o.fitter) {
+      if (o.origin !== me) ops.push(() => store.sendToFitter(o.id, rnd(FITTERS).code, o.origin));
+      continue;
+    }
     const actor = fitActor(o);
-    if (actor && actor !== me && now - o.updatedAt > 100e3) {
+    if (actor && actor !== me) {
       ops.push(() => store.advanceOrders([o.id], actor));
       if (o.urgent) ops.push(() => store.advanceOrders([o.id], actor)); // urgent moves faster
     }
@@ -252,19 +276,7 @@ function simTick() {
   // Warehouse works its queue (unless the user *is* the warehouse).
   if (me !== 'WH') {
     for (const r of state.requests) {
-      if (now - r.updatedAt < 120e3) continue;
-      if (r.status === 'awaiting') ops.push(() => {
-        const decisions = {};
-        for (const l of r.lines) if (l.qty > 6 && Math.random() < 0.3) decisions[l.id] = { qty: Math.ceil(l.qty * 0.7) };
-        store.reviewRequest(r.id, decisions, 'WH');
-      });
-      if (r.status === 'approved') ops.push(() => store.dispatchRequest(r.id, 'WH'));
-    }
-  }
-  // Branches confirm deliveries.
-  for (const r of state.requests) {
-    if (r.status === 'dispatched' && r.branch !== me && now - r.updatedAt > 150e3) {
-      ops.push(() => store.receiveRequest(r.id, r.branch));
+      if (r.status === 'placed' && now - r.updatedAt > 140e3) ops.push(() => store.completeRequest(r.id, 'WH'));
     }
   }
   // Occasionally, somewhere in the network, a new sale needs fitting.
@@ -273,19 +285,22 @@ function simTick() {
     const origin = rnd(BRANCHES.filter(b => b.code !== me));
     const [brand, model, lens] = rnd(SIM_FRAMES);
     ops.push(() => store.createOrder({
-      ref: store.nextBillRef(), origin: origin.code, fitter: rnd(FITTERS).code,
-      customer: rnd(SIM_NAMES), phone: '', brand, model, lens,
-      urgent: Math.random() < 0.15, note: '',
+      ref: store.nextBillRef(), origin: origin.code,
+      customer: rnd(SIM_NAMES), brand, model, lens,
+      urgent: Math.random() < 0.15,
     }, origin.code));
   }
-  // …or a branch sends a stock request.
-  const open = state.requests.filter(r => r.status === 'awaiting').length;
-  if (me !== 'WH' && open < 6 && Math.random() < 0.18) {
+  // …or a branch places a stock request.
+  const open = state.requests.filter(r => r.status === 'placed').length;
+  if (me !== 'WH' && open < 8 && Math.random() < 0.18) {
     const b = rnd(BRANCHES.filter(x => x.code !== me));
-    ops.push(() => store.createRequest({
-      lines: [{ brand: rnd(BRANDS), category: rnd(CATEGORIES), audience: rnd(AUDIENCES), qty: 4 + Math.floor(Math.random() * 12), note: '' }],
-      note: '',
-    }, b.code));
+    const cat = rnd(state.settings.categories);
+    const line = { category: cat.name };
+    if (cat.needsBrand) line.brand = rnd(state.settings.brands);
+    if (cat.needsAudience) line.audience = rnd(AUDIENCES);
+    if (cat.needsQty !== false) line.qty = 4 + Math.floor(Math.random() * 12);
+    line.note = '';
+    ops.push(() => store.createRequest({ lines: [line], note: '' }, b.code));
   }
 
   if (ops.length) rnd(ops)();
