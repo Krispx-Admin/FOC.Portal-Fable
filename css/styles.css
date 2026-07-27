@@ -222,6 +222,8 @@ svg { width: 18px; height: 18px; flex: none; }
 .side-link svg { width: 15px; height: 15px; }
 
 .content { overflow-y: auto; padding: 30px 36px 60px; }
+.content.schedule-embed { padding: 0; overflow: hidden; }
+.schedule-frame { width: 100%; height: 100%; border: 0; display: block; background: #eef2f0; }
 .mod-in { animation: fadeUp .3s ease both; }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
