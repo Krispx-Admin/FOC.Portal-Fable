@@ -2,11 +2,12 @@
 import {
   seedState, loc, locName, BRANCHES, FITTERS, AUDIENCES,
   FIT_STATUS, nextFitStatus, fitActor,
-  canAdvanceOrder, canSeeOrder, canSeeRequest,
+  canAdvanceOrder, canSeeOrder, canSeeRequest, canSeeLensRequest,
+  LENS_OWNER, lensFull,
 } from './data.js';
 
-const STATE_VERSION = 3;
-const STATE_KEY = 'focp.state.v3';
+const STATE_VERSION = 4;
+const STATE_KEY = 'focp.state.v4';
 const SESSION_KEY = 'focp.session';
 const LEADER_KEY = 'focp.leader';
 const TAB = Math.random().toString(36).slice(2, 10);
@@ -80,6 +81,11 @@ export const store = {
   order(id) { return state.orders.find(o => o.id === id); },
   request(id) { return state.requests.find(r => r.id === id); },
   nextBillRef() { return `B-${state.seq.bill + 1}`; },
+
+  get lensStock() { return state.lensStock; },
+  lensItem(id) { return state.lensStock.find(i => i.id === id); },
+  lensRequestsFor(code) { return state.lensRequests.filter(r => canSeeLensRequest(r, code)); },
+  lensRequest(id) { return state.lensRequests.find(r => r.id === id); },
 
   resetDemo() {
     state = seedState();
@@ -183,6 +189,92 @@ export const store = {
     r.updatedAt = now;
     r.timeline.push({ at: now, by, text: 'Fulfilled and completed at the warehouse' });
     commit({ by, module: 'stock', title: `${by} completed ${r.ref}`, sub: `→ ${locName(r.branch)}`, refs: [r.id] });
+  },
+
+  // ── Lens stock (owned by the holding fitting centre) ──
+  // Same spec twice means more of the same lens on the shelf, not a second row.
+  addLensItem(f, by) {
+    const spec = { type: f.type, index: f.index, coating: f.coating, sph: +f.sph, cyl: +f.cyl };
+    const qty = Math.max(0, parseInt(f.qty, 10) || 0);
+    const now = Date.now();
+    const dupe = state.lensStock.find(i =>
+      i.type === spec.type && i.index === spec.index && i.coating === spec.coating &&
+      i.sph === spec.sph && i.cyl === spec.cyl);
+    if (dupe) {
+      dupe.qty += qty;
+      dupe.updatedAt = now;
+      commit({ by, module: 'lens', title: `${by} added ${qty} to existing stock`, sub: lensFull(dupe), refs: [dupe.id] });
+      return dupe;
+    }
+    const item = { id: 'ls' + now.toString(36) + Math.random().toString(36).slice(2, 6), ...spec, qty, updatedAt: now };
+    state.lensStock.unshift(item);
+    commit({ by, module: 'lens', title: `${by} added lens stock`, sub: `${lensFull(item)} · ${qty} pcs`, refs: [item.id] });
+    return item;
+  },
+  setLensQty(id, qty, by) {
+    const i = this.lensItem(id);
+    if (!i) return;
+    i.qty = Math.max(0, parseInt(qty, 10) || 0);
+    i.updatedAt = Date.now();
+    commit({ by, module: 'lens', title: `${by} updated lens count`, sub: `${lensFull(i)} → ${i.qty} pcs`, refs: [i.id] });
+  },
+  removeLensItem(id, by) {
+    const i = this.lensItem(id);
+    if (!i) return;
+    state.lensStock = state.lensStock.filter(x => x.id !== id);
+    commit({ by, module: 'lens', title: `${by} removed lens stock`, sub: lensFull(i), refs: [id] });
+  },
+
+  // ── Lens requests (branch → holding centre) ──
+  createLensRequest({ lines, note }, by) {
+    const now = Date.now();
+    state.seq.lens++;
+    const pcs = lines.reduce((s, l) => s + (l.qty || 0), 0);
+    const r = {
+      id: 'x' + now.toString(36) + Math.random().toString(36).slice(2, 6),
+      ref: `LR-${state.seq.lens}`, branch: by, status: 'requested', note: note ?? '', reason: '',
+      lines: lines.map((l, i) => ({ id: `ll${now.toString(36)}${i}`, ...l })),
+      createdAt: now, updatedAt: now,
+      timeline: [{ at: now, by, text: `Requested ${lines.length} lens type${lines.length > 1 ? 's' : ''}, ${pcs} pcs from ${locName(LENS_OWNER)}${note ? ` — ${note}` : ''}` }],
+    };
+    state.lensRequests.unshift(r);
+    commit({ by, module: 'lens', title: `${by} requested lenses ${r.ref}`, sub: `${lines.length} type${lines.length === 1 ? '' : 's'} · ${pcs} pcs`, refs: [r.id] });
+    return r;
+  },
+
+  // Confirming ships the lenses, so the shelf count comes down with it. If the
+  // shelf moved since the request went in, we send what's actually there.
+  confirmLensRequest(id, by) {
+    const r = this.lensRequest(id);
+    if (!r || r.status !== 'requested') return;
+    const now = Date.now();
+    const short = [];
+    let sent = 0;
+    for (const l of r.lines) {
+      const item = this.lensItem(l.itemId);
+      if (!item) { short.push(`${lensFull(l)} — no longer stocked`); continue; }
+      const give = Math.min(item.qty, l.qty);
+      if (give < l.qty) short.push(`${lensFull(l)} — ${give} of ${l.qty}`);
+      item.qty -= give;
+      item.updatedAt = now;
+      sent += give;
+    }
+    r.status = 'confirmed';
+    r.updatedAt = now;
+    r.timeline.push({ at: now, by, text: `Confirmed — ${sent} pcs deducted from stock and sent to ${locName(r.branch)}` });
+    if (short.length) r.timeline.push({ at: now, by, text: `Short on: ${short.join('; ')}` });
+    commit({ by, module: 'lens', title: `${by} confirmed ${r.ref}`, sub: `→ ${locName(r.branch)} · ${sent} pcs`, refs: [r.id] });
+  },
+
+  declineLensRequest(id, reason, by) {
+    const r = this.lensRequest(id);
+    if (!r || r.status !== 'requested') return;
+    const now = Date.now();
+    r.status = 'declined';
+    r.reason = (reason || '').trim();
+    r.updatedAt = now;
+    r.timeline.push({ at: now, by, text: `Declined${r.reason ? ` — ${r.reason}` : ''}` });
+    commit({ by, module: 'lens', title: `${by} declined ${r.ref}`, sub: `→ ${locName(r.branch)}`, refs: [r.id] });
   },
 
   // ── Settings (admin) ──
@@ -289,6 +381,25 @@ function simTick() {
       customer: rnd(SIM_NAMES), brand, model, lens,
       urgent: Math.random() < 0.15,
     }, origin.code));
+  }
+  // The lens holder works its own queue (unless the user *is* the lens holder).
+  if (me !== LENS_OWNER) {
+    for (const r of state.lensRequests) {
+      if (r.status === 'requested' && now - r.updatedAt > 150e3) ops.push(() => store.confirmLensRequest(r.id, LENS_OWNER));
+    }
+  }
+  // …or a branch asks the lens holder for stock it can actually spare.
+  const openLens = state.lensRequests.filter(r => r.status === 'requested').length;
+  if (openLens < 6 && Math.random() < 0.16) {
+    const b = rnd(BRANCHES.filter(x => x.code !== me && x.code !== LENS_OWNER));
+    const avail = state.lensStock.filter(i => i.qty > 2);
+    if (b && avail.length) {
+      const it = rnd(avail);
+      const { id, updatedAt, qty, ...spec } = it;
+      ops.push(() => store.createLensRequest({
+        lines: [{ itemId: it.id, ...spec, qty: 1 + Math.floor(Math.random() * 2) }], note: '',
+      }, b.code));
+    }
   }
   // …or a branch places a stock request.
   const open = state.requests.filter(r => r.status === 'placed').length;

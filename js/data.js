@@ -78,6 +78,28 @@ export const REQ_STATUS = {
   completed: { label: 'Completed', color: 'green' },
 };
 
+// ── Lens stock ──────────────────────────────────────────────────────────────
+// One fitting centre physically holds the loose-lens stock and owns the shelf
+// count; every other location browses it and requests against it.
+export const LENS_OWNER = 'MGM';
+export const LENS_TYPES = ['Single vision', 'Bifocal', 'Progressive'];
+export const LENS_INDICES = ['1.50', '1.56', '1.60', '1.67', '1.74'];
+export const LENS_COATINGS = ['None', 'AR', 'Blue-cut', 'Photochromic'];
+export const LOW_LENS_STOCK = 4; // at or below this, flag it as running low
+
+// A branch asks, MGM answers. Confirming ships the lenses and draws down stock.
+export const LENSREQ_STATUS = {
+  requested: { label: 'Awaiting MGM', color: 'amber' },
+  confirmed: { label: 'Confirmed',    color: 'green' },
+  declined:  { label: 'Declined',     color: 'red'   },
+};
+
+// Optical notation: powers always carry an explicit sign, to two decimals.
+export const fmtPwr = n => `${Number(n) > 0 ? '+' : ''}${Number(n).toFixed(2)}`;
+export const lensLabel = i => `${i.type} ${i.index}${i.coating && i.coating !== 'None' ? ` · ${i.coating}` : ''}`;
+export const lensRx = i => `SPH ${fmtPwr(i.sph)} · CYL ${fmtPwr(i.cyl)}`;
+export const lensFull = i => `${lensLabel(i)} · ${lensRx(i)}`;
+
 // ── Permissions ──
 export function canSeeOrder(o, code) {
   const me = loc(code);
@@ -90,6 +112,11 @@ export function canAdvanceOrder(o, code) {
 }
 export function canSeeRequest(r, code) {
   return loc(code)?.role === 'admin' || r.branch === code;
+}
+// Only the holding branch edits the shelf count; the warehouse may look on.
+export const isLensOwner = code => code === LENS_OWNER;
+export function canSeeLensRequest(r, code) {
+  return isLensOwner(code) || loc(code)?.role === 'admin' || r.branch === code;
 }
 
 // ── Seed data ────────────────────────────────────────────────────────────────
@@ -124,12 +151,73 @@ function mkReq(now, { ref, branch, status, ageH, note, lines }) {
            createdAt: created, updatedAt: last.at, timeline };
 }
 
+// MGM's physical shelf: [type, index, coating, sph, cyl, qty]
+const LENS_SEED = [
+  ['Single vision', '1.50', 'AR',           -1.00,  0.00, 24],
+  ['Single vision', '1.50', 'AR',           -1.50, -0.50, 18],
+  ['Single vision', '1.50', 'AR',           -2.00,  0.00, 20],
+  ['Single vision', '1.50', 'None',          0.00,  0.00, 30],
+  ['Single vision', '1.50', 'Blue-cut',     -1.25, -0.75, 12],
+  ['Single vision', '1.56', 'Blue-cut',     -2.50, -0.75,  9],
+  ['Single vision', '1.56', 'Blue-cut',      1.50,  0.00, 14],
+  ['Single vision', '1.56', 'Photochromic', -3.00, -1.00,  6],
+  ['Single vision', '1.60', 'AR',           -3.50,  0.00, 11],
+  ['Single vision', '1.60', 'AR',           -4.00, -1.25,  7],
+  ['Single vision', '1.60', 'Blue-cut',     -2.75, -0.50,  8],
+  ['Single vision', '1.67', 'AR',           -5.50, -1.00,  4],
+  ['Single vision', '1.74', 'AR',           -7.00, -1.50,  2],
+  ['Bifocal',       '1.56', 'AR',            2.00, -0.50,  6],
+  ['Bifocal',       '1.56', 'AR',           -1.75,  0.00,  5],
+  ['Progressive',   '1.60', 'AR',           -1.50, -0.50,  8],
+  ['Progressive',   '1.60', 'Blue-cut',      2.25,  0.00,  5],
+  ['Progressive',   '1.67', 'Blue-cut',     -2.50, -0.75,  3],
+  ['Progressive',   '1.67', 'AR',           -4.25, -1.00,  2],
+  ['Progressive',   '1.74', 'AR',           -6.00, -1.25,  1],
+];
+
+function mkLensStock(now) {
+  return LENS_SEED.map(([type, index, coating, sph, cyl, qty], i) => ({
+    id: `ls${i}`, type, index, coating, sph, cyl, qty,
+    updatedAt: now - (i + 2) * H,
+  }));
+}
+
+// picks: [stockIndex, qty] against the seeded shelf above
+function mkLensReq(now, stock, { ref, branch, status, ageH, note, picks, reason }) {
+  const created = now - ageH * H;
+  const lines = picks.map(([si, qty], i) => {
+    const s = stock[si];
+    return { id: `ll${ref}${i}`, itemId: s.id, type: s.type, index: s.index, coating: s.coating, sph: s.sph, cyl: s.cyl, qty };
+  });
+  const pcs = lines.reduce((s, l) => s + l.qty, 0);
+  const timeline = [{ at: created, by: branch, text: `Requested ${lines.length} lens type${lines.length > 1 ? 's' : ''}, ${pcs} pcs from ${locName(LENS_OWNER)}${note ? ` — ${note}` : ''}` }];
+  if (status === 'confirmed') timeline.push({ at: created + (now - created) * 0.55, by: LENS_OWNER, text: `Confirmed — ${pcs} pcs deducted from stock and sent to ${locName(branch)}` });
+  if (status === 'declined')  timeline.push({ at: created + (now - created) * 0.55, by: LENS_OWNER, text: `Declined${reason ? ` — ${reason}` : ''}` });
+  const last = timeline[timeline.length - 1];
+  return { id: nid(), ref, branch, status, note: note ?? '', reason: reason ?? '', lines,
+           createdAt: created, updatedAt: last.at, timeline };
+}
+
 export function seedState() {
   const now = Date.now();
+  const lensStock = mkLensStock(now);
   return {
-    v: 3,
+    v: 4,
     rev: 1,
-    seq: { bill: 58241, req: 1027 },
+    seq: { bill: 58241, req: 1027, lens: 2043 },
+    lensStock,
+    lensRequests: [
+      mkLensReq(now, lensStock, { ref: 'LR-2043', branch: 'SCC', status: 'requested', ageH: 1.5, note: 'Two jobs waiting on these',
+        picks: [[8, 2], [15, 1]] }),
+      mkLensReq(now, lensStock, { ref: 'LR-2042', branch: 'QCC', status: 'requested', ageH: 4,   note: '',
+        picks: [[5, 3], [17, 1]] }),
+      mkLensReq(now, lensStock, { ref: 'LR-2041', branch: 'QURFEC', status: 'requested', ageH: 0.4, note: 'Clinic re-cut',
+        picks: [[0, 4]] }),
+      mkLensReq(now, lensStock, { ref: 'LR-2038', branch: 'MOUJ', status: 'confirmed', ageH: 22,  note: '',
+        picks: [[2, 2], [9, 1]] }),
+      mkLensReq(now, lensStock, { ref: 'LR-2035', branch: 'AV',   status: 'declined',  ageH: 34,  note: 'Rush job',
+        picks: [[19, 3]], reason: 'Only 1 left on the shelf — reorder placed with the lab' }),
+    ],
     settings: {
       brands: [...BRANDS],
       categories: DEFAULT_CATEGORIES.map(c => ({ ...c })),

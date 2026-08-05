@@ -1,10 +1,11 @@
 // ── App shell: login, sidebar navigation, routing, live toasts ──
-import { LOCATIONS, ROLES, loc, canSeeOrder, canSeeRequest, canAdvanceOrder } from './data.js';
+import { LOCATIONS, ROLES, loc, canSeeOrder, canSeeRequest, canSeeLensRequest, canAdvanceOrder, isLensOwner } from './data.js';
 import { store, startSim, stopSim } from './store.js';
 import { esc, icons, toast, closeLayer } from './ui.js';
 import { fittingView } from './fitting.js';
 import { stockView } from './stock.js';
 import { scheduleView } from './schedule.js';
+import { lensView } from './lens.js';
 import { settingsView } from './settings.js';
 
 const app = document.getElementById('app');
@@ -103,6 +104,7 @@ const MODULES = {
   fitting:  { label: 'Fitting Log', icon: 'glasses', make: fittingView },
   stock:    { label: 'Stock Requests', icon: 'box', make: stockView, adminLabel: 'Warehouse Queue', adminIcon: 'warehouse' },
   schedule: { label: 'Schedule', icon: 'calendar', make: scheduleView },
+  lens:     { label: 'Lens Stock', icon: 'lens', make: lensView },
   settings: { label: 'Settings', icon: 'settings', make: settingsView, adminOnly: true },
 };
 
@@ -122,7 +124,11 @@ function badgeCounts(me) {
   const stock = me.role === 'admin'
     ? s.requests.filter(r => r.status === 'placed').length
     : s.requests.filter(r => canSeeRequest(r, me.code) && r.status === 'placed').length;
-  return { fitting, stock };
+  // Only the branch holding the lenses has something to act on here.
+  const lens = isLensOwner(me.code)
+    ? s.lensRequests.filter(r => r.status === 'requested').length
+    : 0;
+  return { fitting, stock, lens };
 }
 
 function renderShell() {
@@ -169,8 +175,10 @@ function renderShell() {
     if (event?.remote && event.title && event.module !== 'system') {
       const relevant =
         (event.module === 'fitting' && event.refs?.some(id => { const o = store.state.orders.find(x => x.id === id); return o && canSeeOrder(o, me.code); })) ||
-        (event.module === 'stock' && event.refs?.some(id => { const r = store.state.requests.find(x => x.id === id); return r && canSeeRequest(r, me.code); }));
-      if (relevant) toast({ title: event.title, sub: event.sub ?? '', tone: event.module === 'fitting' ? 'info' : 'stock' });
+        (event.module === 'stock' && event.refs?.some(id => { const r = store.state.requests.find(x => x.id === id); return r && canSeeRequest(r, me.code); })) ||
+        (event.module === 'lens' && event.refs?.some(id => { const r = store.state.lensRequests.find(x => x.id === id); return r && canSeeLensRequest(r, me.code); }));
+      const tone = event.module === 'fitting' ? 'info' : event.module === 'lens' ? 'lens' : 'stock';
+      if (relevant) toast({ title: event.title, sub: event.sub ?? '', tone });
     }
     if (event?.module === 'system') { // demo reset from any tab
       mountModule(currentModule());
