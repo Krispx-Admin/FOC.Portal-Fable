@@ -197,7 +197,7 @@ export function lensView(me) {
       </section>
       <section class="chips">${REQ_CHIPS.map(d =>
         `<button class="chip ${ui.chip === d.key ? 'on' : ''}" data-chip="${d.key}">${esc(d.label)}<span class="chip-n">${c[d.key]}</span></button>`).join('')}</section>
-      <section class="list">${reqRowsHTML()}</section>`;
+      <section class="list" id="l-list">${reqRowsHTML()}</section>`;
   }
 
   // ── owner: shelf editor ──
