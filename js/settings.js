@@ -118,7 +118,28 @@ export function settingsView(me) {
     wire();
   }
 
+  // Re-rendering destroys the text box you may be typing in — the per-group
+  // "add brand" forms and the rename inputs live inside the markup we replace.
+  // These two let us put the caret back exactly where it was.
+  function focusKey(el) {
+    if (!el) return null;
+    if (el.dataset.groupName != null) return ['name', el.dataset.groupName];
+    const f = el.closest('form[data-add-brand]');
+    if (f && el.name === 'name') return ['add', f.dataset.addBrand];
+    return null;
+  }
+  function findByKey([kind, group]) {
+    const g = CSS.escape(group);
+    return kind === 'name'
+      ? root.querySelector(`.set-bg-name[data-group-name="${g}"]`)
+      : root.querySelector(`form[data-add-brand="${g}"] input[name="name"]`);
+  }
+
   function refresh() {
+    const a = document.activeElement;
+    const key = a && root.contains(a) ? focusKey(a) : null;
+    const held = key ? { value: a.value, start: a.selectionStart, end: a.selectionEnd } : null;
+
     const c = root.querySelector('#set-cats');
     const g = root.querySelector('#set-groups');
     if (c) c.innerHTML = categoriesHTML();
@@ -127,6 +148,15 @@ export function settingsView(me) {
     // would otherwise go stale after a group is added, renamed or removed.
     const sel = root.querySelector('#add-cat select[name="brandGroup"]');
     if (sel) sel.innerHTML = groupOptionsHTML(sel.value);
+
+    if (held) {
+      const el = findByKey(key);
+      if (el) {
+        el.value = held.value;
+        el.focus();
+        try { el.setSelectionRange(held.start, held.end); } catch { /* not a text input */ }
+      }
+    }
   }
 
   function wire() {
@@ -250,7 +280,10 @@ export function settingsView(me) {
 
   return {
     mount(container) { root = container; render(); },
-    onChange() { refresh(); },
+    // Only settings changes affect this screen. Redrawing for every fitting
+    // order or stock request the network produces would throw away whatever
+    // the admin is part-way through typing, for nothing.
+    onChange(event) { if (event?.module === 'settings') refresh(); },
     unmount() {},
   };
 }
