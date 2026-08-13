@@ -3,11 +3,11 @@ import {
   seedState, loc, locName, BRANCHES, FITTERS, AUDIENCES,
   FIT_STATUS, nextFitStatus, fitActor,
   canAdvanceOrder, canSeeOrder, canSeeRequest, canSeeLensRequest,
-  LENS_OWNER, lensFull,
+  LENS_OWNER, lensFull, brandsFor,
 } from './data.js';
 
-const STATE_VERSION = 4;
-const STATE_KEY = 'focp.state.v4';
+const STATE_VERSION = 5;
+const STATE_KEY = 'focp.state.v5';
 const SESSION_KEY = 'focp.session';
 const LEADER_KEY = 'focp.leader';
 const TAB = Math.random().toString(36).slice(2, 10);
@@ -81,6 +81,18 @@ export const store = {
   order(id) { return state.orders.find(o => o.id === id); },
   request(id) { return state.requests.find(r => r.id === id); },
   nextBillRef() { return `B-${state.seq.bill + 1}`; },
+
+  // Resolved through the store so the composer and the simulator can never
+  // disagree about which brands a category offers or how it's counted.
+  brandsFor(cat) {
+    const c = typeof cat === 'string' ? state.settings.categories.find(x => x.name === cat) : cat;
+    return brandsFor(state.settings, c);
+  },
+  unitFor(cat) {
+    const c = typeof cat === 'string' ? state.settings.categories.find(x => x.name === cat) : cat;
+    return c?.unit === 'box' ? 'box' : 'pcs';
+  },
+  brandGroup(name) { return state.settings.brandGroups.find(g => g.name === name); },
 
   get lensStock() { return state.lensStock; },
   lensItem(id) { return state.lensStock.find(i => i.id === id); },
@@ -278,32 +290,88 @@ export const store = {
   },
 
   // ── Settings (admin) ──
-  addBrand(name) {
+  // Brand groups. Names are the key categories point at, so a rename has to
+  // carry those pointers with it.
+  addBrandGroup(name) {
     name = String(name).trim();
-    if (!name || state.settings.brands.some(b => b.toLowerCase() === name.toLowerCase())) return;
-    state.settings.brands.push(name);
-    commit({ module: 'settings', title: `Brand added: ${name}` });
+    if (!name || state.settings.brandGroups.some(g => g.name.toLowerCase() === name.toLowerCase())) return;
+    state.settings.brandGroups.push({ name, brands: [] });
+    commit({ module: 'settings', title: `Brand group added: ${name}` });
   },
-  removeBrand(name) {
-    state.settings.brands = state.settings.brands.filter(b => b !== name);
-    commit({ module: 'settings', title: `Brand removed: ${name}` });
+  renameBrandGroup(oldName, newName) {
+    newName = String(newName).trim();
+    const g = this.brandGroup(oldName);
+    if (!g || !newName || newName === oldName) return;
+    if (state.settings.brandGroups.some(x => x !== g && x.name.toLowerCase() === newName.toLowerCase())) return;
+    g.name = newName;
+    for (const c of state.settings.categories) if (c.brandGroup === oldName) c.brandGroup = newName;
+    commit({ module: 'settings', title: `Brand group renamed: ${oldName} → ${newName}` });
   },
-  reorderBrands(from, to) {
-    const a = state.settings.brands;
+  removeBrandGroup(name) {
+    state.settings.brandGroups = state.settings.brandGroups.filter(g => g.name !== name);
+    // Don't leave categories pointing at something that no longer exists.
+    const fallback = state.settings.brandGroups[0]?.name ?? '';
+    for (const c of state.settings.categories) if (c.brandGroup === name) c.brandGroup = fallback;
+    commit({ module: 'settings', title: `Brand group removed: ${name}` });
+  },
+  reorderBrandGroups(from, to) {
+    const a = state.settings.brandGroups;
     if (from === to || from < 0 || to < 0 || from >= a.length || to >= a.length) return;
     const [x] = a.splice(from, 1);
     a.splice(to, 0, x);
-    commit({ module: 'settings', title: 'Brands reordered' });
+    commit({ module: 'settings', title: 'Brand groups reordered' });
   },
-  addCategory({ name, needsBrand = true, needsAudience = true, needsQty = true }) {
+
+  // Brands, scoped to a group. The same brand may live in several groups, so
+  // the duplicate check deliberately only looks inside the target group.
+  addBrand(group, name) {
+    const g = this.brandGroup(group);
+    name = String(name).trim();
+    if (!g || !name || g.brands.some(b => b.toLowerCase() === name.toLowerCase())) return;
+    g.brands.push(name);
+    commit({ module: 'settings', title: `Brand added: ${name}`, sub: group });
+  },
+  removeBrand(group, name) {
+    const g = this.brandGroup(group);
+    if (!g) return;
+    g.brands = g.brands.filter(b => b !== name);
+    commit({ module: 'settings', title: `Brand removed: ${name}`, sub: group });
+  },
+  // Covers both reordering inside a group and moving between groups. Dropping
+  // a brand into a group that already has it just removes it from the source.
+  moveBrand(fromGroup, fromIdx, toGroup, toIdx) {
+    const src = this.brandGroup(fromGroup);
+    const dst = this.brandGroup(toGroup);
+    if (!src || !dst || fromIdx < 0 || fromIdx >= src.brands.length) return;
+    if (src === dst && toIdx === fromIdx) return;
+    const [brand] = src.brands.splice(fromIdx, 1);
+    if (src !== dst && dst.brands.includes(brand)) {
+      commit({ module: 'settings', title: `Brand removed: ${brand}`, sub: `already in ${toGroup}` });
+      return;
+    }
+    const at = toIdx < 0 || toIdx > dst.brands.length ? dst.brands.length : toIdx;
+    dst.brands.splice(at, 0, brand);
+    commit({
+      module: 'settings',
+      title: src === dst ? 'Brands reordered' : `Brand moved: ${brand}`,
+      sub: src === dst ? fromGroup : `${fromGroup} → ${toGroup}`,
+    });
+  },
+
+  addCategory({ name, needsBrand = true, needsAudience = true, needsQty = true, unit = 'pcs', brandGroup }) {
     name = String(name).trim();
     if (!name || state.settings.categories.some(c => c.name.toLowerCase() === name.toLowerCase())) return;
-    state.settings.categories.push({ name, needsBrand, needsAudience, needsQty });
+    state.settings.categories.push({
+      name, needsBrand, needsAudience, needsQty,
+      unit: unit === 'box' ? 'box' : 'pcs',
+      brandGroup: brandGroup ?? state.settings.brandGroups[0]?.name ?? '',
+    });
     commit({ module: 'settings', title: `Category added: ${name}` });
   },
   updateCategory(name, patch) {
     const c = state.settings.categories.find(c => c.name === name);
     if (!c) return;
+    if ('unit' in patch) patch = { ...patch, unit: patch.unit === 'box' ? 'box' : 'pcs' };
     Object.assign(c, patch);
     commit({ module: 'settings', title: `Category updated: ${c.name}` });
   },
@@ -406,12 +474,18 @@ function simTick() {
   if (me !== 'WH' && open < 8 && Math.random() < 0.18) {
     const b = rnd(BRANCHES.filter(x => x.code !== me));
     const cat = rnd(state.settings.categories);
-    const line = { category: cat.name };
-    if (cat.needsBrand) line.brand = rnd(state.settings.brands);
-    if (cat.needsAudience) line.audience = rnd(AUDIENCES);
-    if (cat.needsQty !== false) line.qty = 4 + Math.floor(Math.random() * 12);
-    line.note = '';
-    ops.push(() => store.createRequest({ lines: [line], note: '' }, b.code));
+    if (cat) {
+      const line = { category: cat.name };
+      // An empty brand group just yields a brandless line rather than throwing.
+      if (cat.needsBrand) { const brand = rnd(store.brandsFor(cat)); if (brand) line.brand = brand; }
+      if (cat.needsAudience) line.audience = rnd(AUDIENCES);
+      if (cat.needsQty !== false) {
+        line.qty = 4 + Math.floor(Math.random() * 12);
+        line.unit = store.unitFor(cat);
+      }
+      line.note = '';
+      ops.push(() => store.createRequest({ lines: [line], note: '' }, b.code));
+    }
   }
 
   if (ops.length) rnd(ops)();

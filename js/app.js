@@ -4,7 +4,6 @@ import { store, startSim, stopSim } from './store.js';
 import { esc, icons, toast, closeLayer } from './ui.js';
 import { fittingView } from './fitting.js';
 import { stockView } from './stock.js';
-import { scheduleView } from './schedule.js';
 import { lensView } from './lens.js';
 import { settingsView } from './settings.js';
 
@@ -103,7 +102,6 @@ function wirePin(code) {
 const MODULES = {
   fitting:  { label: 'Fitting Log', icon: 'glasses', make: fittingView },
   stock:    { label: 'Stock Requests', icon: 'box', make: stockView, adminLabel: 'Warehouse Queue', adminIcon: 'warehouse' },
-  schedule: { label: 'Schedule', icon: 'calendar', make: scheduleView },
   lens:     { label: 'Lens Stock', icon: 'lens', make: lensView },
   settings: { label: 'Settings', icon: 'settings', make: settingsView, adminOnly: true },
 };

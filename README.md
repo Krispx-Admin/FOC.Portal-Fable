@@ -17,7 +17,9 @@ python3 -m http.server 8000     # or: npx serve
 | Module | What it does |
 |---|---|
 | **Fitting Log** | Tracks a frame's physical journey: branch → fitting centre → back to the branch. Log an order with just a bill number, then send it to a fitting centre. Pipeline: Pending → In transit to fitter → At fitter → Ready → Returning → Delivered, with click-to-select + bulk advance, urgent flags, a per-order journey diagram (the fitter node turns green when ready) and a full audit timeline. |
-| **Stock Requests** | Branches compose category-first requests; the admin controls, per category, whether brand/audience/quantity are needed (Settings). No review step — the warehouse prints the pick sheet, fulfils it, and marks it completed. |
+| **Stock Requests** | Branches compose category-first requests; the admin controls, per category, which fields are needed, whether it's counted in pieces or boxes, and which brand group it offers (Settings). No review step — the warehouse prints the pick sheet, fulfils it, and marks it completed. |
+| **Lens Stock** | One fitting centre (MGM) holds the loose-lens shelf and is the only location that can edit its counts. Every other branch browses that shelf by type / index / coating / SPH / CYL, builds a basket and requests it; MGM confirms — which deducts the quantities — or declines with a reason. |
+| **Settings** *(admin)* | Request categories: which fields each needs, pieces vs boxes, and its brand group. Brand groups: named lists of brands, drag-and-drop between them, so picking *Solutions & drops* never offers a sunglasses brand. |
 
 ## The model
 
@@ -51,4 +53,6 @@ js/ui.js            DOM helpers, icons, toasts, modal/drawer layers
 js/app.js           login, shell, navigation, live toasts
 js/fitting.js       Module 1 — Fitting Log
 js/stock.js         Module 2 — Stock Requests / Warehouse queue
+js/settings.js      Module 3 — Settings: categories & brand groups (admin)
+js/lens.js          Module 4 — Lens Stock
 ```

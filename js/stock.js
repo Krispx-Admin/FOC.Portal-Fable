@@ -1,7 +1,7 @@
 // ── Module 2: Stock Requests — branch composer + warehouse fulfilment queue ──
 import { REQ_STATUS, AUDIENCES, BRANCHES, locName } from './data.js';
 import { store } from './store.js';
-import { esc, relTime, fmtDT, icons, pill, locChip, openLayer, closeLayer } from './ui.js';
+import { esc, relTime, fmtDT, icons, pill, locChip, openLayer, closeLayer, toast } from './ui.js';
 
 const CHIPS = [
   { key: 'placed', label: 'To fulfil' },
@@ -211,11 +211,18 @@ export function stockView(me) {
   // ── composer: new stock request ──
   function composerModal() {
     const cats = store.settings.categories;
-    const brands = store.settings.brands;
+    if (!cats.length) {
+      return toast({ title: 'No request categories configured', sub: 'Ask the warehouse to add one in Settings.', tone: 'stock' });
+    }
     const catByName = name => cats.find(c => c.name === name) ?? cats[0];
+    // Resolved live rather than snapshotted, so a settings change in another tab
+    // can't leave this modal offering brands the category no longer allows.
+    const brandsOf = c => store.brandsFor(c);
+    const unitOf = c => store.unitFor(c);
     function blankLine() {
       const c = cats[0];
-      return { category: c.name, brand: c.needsBrand ? brands[0] : '', audience: c.needsAudience ? 'Unisex' : '', qty: c.needsQty !== false ? 6 : null, unit: 'pcs', note: '' };
+      const bs = brandsOf(c);
+      return { category: c.name, brand: c.needsBrand ? (bs[0] ?? '') : '', audience: c.needsAudience ? 'Unisex' : '', qty: c.needsQty !== false ? 6 : null, unit: unitOf(c), note: '' };
     }
     let lines = [blankLine()];
 
@@ -224,18 +231,19 @@ export function stockView(me) {
 
     const lineRow = (l, i) => {
       const c = catByName(l.category);
+      const bs = brandsOf(c);
       return `
         <div class="cl-row">
           ${sel('category', cats.map(c => c.name), l.category, i)}
-          ${c.needsBrand ? sel('brand', brands, l.brand, i) : '<span class="cl-na">—</span>'}
+          ${c.needsBrand
+            ? (bs.length ? sel('brand', bs, l.brand, i)
+                         : '<span class="cl-na" title="This category’s brand group is empty — add brands in Settings.">no brands</span>')
+            : '<span class="cl-na">—</span>'}
           ${c.needsAudience ? sel('audience', AUDIENCES, l.audience, i) : '<span class="cl-na">—</span>'}
           ${c.needsQty !== false ? `
             <span class="qty-unit">
               <input type="number" min="1" max="999" value="${l.qty ?? 1}" data-f="qty" data-i="${i}">
-              <select data-f="unit" data-i="${i}">
-                <option value="pcs" ${l.unit !== 'box' ? 'selected' : ''}>pcs</option>
-                <option value="box" ${l.unit === 'box' ? 'selected' : ''}>boxes</option>
-              </select>
+              <span class="qty-u">${unitOf(c) === 'box' ? 'boxes' : 'pcs'}</span>
             </span>` : '<span class="cl-na">—</span>'}
           <input placeholder="optional" value="${esc(l.note)}" data-f="note" data-i="${i}">
           <button class="icon-btn" data-del="${i}" ${lines.length === 1 ? 'disabled' : ''}>${icons.x}</button>
@@ -285,11 +293,15 @@ export function stockView(me) {
       if (f === 'category') {
         // Switching category re-applies that category's field rules.
         const c = catByName(e.target.value);
+        const bs = brandsOf(c);
         l.category = e.target.value;
-        l.brand = c.needsBrand ? (l.brand || store.settings.brands[0]) : '';
+        // Keep the brand only if the new category's group actually offers it —
+        // otherwise the select would show its first option while the line still
+        // held the old brand, and that stale value is what would be submitted.
+        l.brand = c.needsBrand ? (bs.includes(l.brand) ? l.brand : (bs[0] ?? '')) : '';
         l.audience = c.needsAudience ? (l.audience || 'Unisex') : '';
         l.qty = c.needsQty !== false ? (l.qty || 6) : null;
-        l.unit = c.needsQty !== false ? (l.unit || 'pcs') : 'pcs';
+        l.unit = unitOf(c);
         const note = preserveNote();
         layer.update(); restoreNote(note); totals();
       } else {
@@ -316,10 +328,12 @@ export function stockView(me) {
           .filter(l => l.category && (catByName(l.category).needsQty === false || l.qty > 0))
           .map(l => {
             const c = catByName(l.category);
+            const bs = brandsOf(c);
             const out = { category: l.category, note: (l.note || '').trim() };
-            if (c.needsBrand) out.brand = (l.brand || '').trim();
+            if (c.needsBrand) out.brand = (bs.includes(l.brand) ? l.brand : (bs[0] ?? '')).trim();
             if (c.needsAudience) out.audience = l.audience;
-            if (c.needsQty !== false) { out.qty = l.qty; out.unit = l.unit === 'box' ? 'box' : 'pcs'; }
+            // The unit comes from the category, so it can't drift from settings.
+            if (c.needsQty !== false) { out.qty = l.qty; out.unit = unitOf(c); }
             return out;
           });
         if (!clean.length) return;

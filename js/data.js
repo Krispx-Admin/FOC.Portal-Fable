@@ -38,19 +38,33 @@ export const BRANDS = [
   'Emporio Armani', 'Carrera', 'Police', 'Vogue Eyewear', 'Silhouette',
   'Lindberg', 'Cazal', 'Bausch + Lomb', 'Acuvue', 'FOC House Brand',
 ];
-// Categories carry per-category rules for the request composer.
+// Brands live in named groups, and each category draws from one of them — so
+// picking "Solutions & drops" never offers a sunglasses brand. Groups are
+// independent lists: the same brand may sit in several of them.
+export const DEFAULT_BRAND_GROUP = 'All brands';
+
+// Categories carry per-category rules for the request composer: which fields it
+// asks for, whether it is counted in pieces or boxes, and its brand group.
 export const DEFAULT_CATEGORIES = [
-  { name: 'Sunglasses',        needsBrand: true,  needsAudience: true,  needsQty: true },
-  { name: 'Optical frames',    needsBrand: true,  needsAudience: true,  needsQty: true },
-  { name: 'Contact lenses',    needsBrand: true,  needsAudience: false, needsQty: true },
-  { name: 'Solutions & drops', needsBrand: true,  needsAudience: false, needsQty: true },
-  { name: 'Cleaning kits',     needsBrand: false, needsAudience: false, needsQty: true },
-  { name: 'Cases & bags',      needsBrand: false, needsAudience: false, needsQty: true },
-  { name: 'Mesh Bags',         needsBrand: false, needsAudience: false, needsQty: true },
-  { name: 'Accessories',       needsBrand: false, needsAudience: false, needsQty: true },
+  { name: 'Sunglasses',        needsBrand: true,  needsAudience: true,  needsQty: true, unit: 'pcs' },
+  { name: 'Optical frames',    needsBrand: true,  needsAudience: true,  needsQty: true, unit: 'pcs' },
+  { name: 'Contact lenses',    needsBrand: true,  needsAudience: false, needsQty: true, unit: 'box' },
+  { name: 'Solutions & drops', needsBrand: true,  needsAudience: false, needsQty: true, unit: 'pcs' },
+  { name: 'Cleaning kits',     needsBrand: false, needsAudience: false, needsQty: true, unit: 'box' },
+  { name: 'Cases & bags',      needsBrand: false, needsAudience: false, needsQty: true, unit: 'pcs' },
+  { name: 'Mesh Bags',         needsBrand: false, needsAudience: false, needsQty: true, unit: 'pcs' },
+  { name: 'Accessories',       needsBrand: false, needsAudience: false, needsQty: true, unit: 'pcs' },
 ];
-export const CATEGORIES = DEFAULT_CATEGORIES.map(c => c.name);
 export const AUDIENCES = ['Men', 'Women', 'Unisex', 'Kids'];
+export const UNITS = [
+  { value: 'pcs', label: 'per piece' },
+  { value: 'box', label: 'per box' },
+];
+
+// The brands a category may be requested in. Empty when its group was deleted
+// or is still being filled — callers treat that as "no brand on this line".
+export const brandsFor = (settings, cat) =>
+  settings?.brandGroups?.find(g => g.name === cat?.brandGroup)?.brands ?? [];
 
 // ── Fitting pipeline state machine ──
 export const FIT_FLOW = ['pending', 'to_fitter', 'at_fitter', 'ready', 'returning', 'delivered'];
@@ -202,7 +216,7 @@ export function seedState() {
   const now = Date.now();
   const lensStock = mkLensStock(now);
   return {
-    v: 4,
+    v: 5,
     rev: 1,
     seq: { bill: 58241, req: 1027, lens: 2043 },
     lensStock,
@@ -219,8 +233,9 @@ export function seedState() {
         picks: [[19, 3]], reason: 'Only 1 left on the shelf — reorder placed with the lab' }),
     ],
     settings: {
-      brands: [...BRANDS],
-      categories: DEFAULT_CATEGORIES.map(c => ({ ...c })),
+      // Everything starts in one group; the admin splits it by dragging.
+      brandGroups: [{ name: DEFAULT_BRAND_GROUP, brands: [...BRANDS] }],
+      categories: DEFAULT_CATEGORIES.map(c => ({ ...c, brandGroup: DEFAULT_BRAND_GROUP })),
     },
     orders: [
       mkOrder(now, { ref: 'B-58214', origin: 'SCC',    fitter: null,  customer: 'Ahmed Al Balushi',  phone: '9123 4410', brand: 'Ray-Ban',        model: 'RB5154 Clubmaster', lens: 'Single vision 1.60 AR',        status: 'pending',   ageH: 1.2 }),
@@ -246,7 +261,7 @@ export function seedState() {
         ] }),
       mkReq(now, { ref: 'SR-1021', branch: 'QCC', status: 'placed', ageH: 5, note: '',
         lines: [
-          { brand: 'Acuvue', category: 'Contact lenses', qty: 24, note: 'Oasys 1-Day, mixed powers' },
+          { brand: 'Acuvue', category: 'Contact lenses', qty: 24, unit: 'box', note: 'Oasys 1-Day, mixed powers' },
           { brand: 'Bausch + Lomb', category: 'Solutions & drops', qty: 18, note: '' },
         ] }),
       mkReq(now, { ref: 'SR-1024', branch: 'MOUJ', status: 'placed', ageH: 1, note: 'Weekend promo prep',
@@ -274,7 +289,7 @@ export function seedState() {
         lines: [
           { brand: 'Tom Ford', category: 'Sunglasses',     audience: 'Men',   qty: 6 },
           { brand: 'Versace',  category: 'Sunglasses',     audience: 'Women', qty: 6 },
-          { brand: 'Acuvue',   category: 'Contact lenses', qty: 12 },
+          { brand: 'Acuvue',   category: 'Contact lenses', qty: 12, unit: 'box' },
         ] }),
     ],
   };
